@@ -1,0 +1,4 @@
+rich==15.0.0
+questionary==2.1.1
+prompt_toolkit==3.0.52
+wcwidth==0.6.0
