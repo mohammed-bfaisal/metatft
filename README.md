@@ -120,6 +120,7 @@ The journal now supports:
 metatft_repo/
 ├── .gitignore
 ├── CHANGELOG.md
+├── LICENSE
 ├── MetaTFT_Spec.md
 ├── README.md
 ├── requirements.txt

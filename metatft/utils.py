@@ -158,6 +158,25 @@ def cooperation_timeline(history: List[RoundEntry], width: int = 15) -> Tuple[st
     return rounds, my, opp
 
 
+
+
+def move_symbol(move: str | Move) -> str:
+    actual = move.value if isinstance(move, Move) else move
+    return '🤝' if actual == Move.COOPERATE.value else '⚠'
+
+
+def outcome_label(my_move: str | Move, opp_move: str | Move) -> str:
+    my = my_move if isinstance(my_move, Move) else Move(my_move)
+    opp = opp_move if isinstance(opp_move, Move) else Move(opp_move)
+    if my == Move.COOPERATE and opp == Move.COOPERATE:
+        return 'both helped'
+    if my == Move.COOPERATE and opp == Move.DEFECT:
+        return 'you got burned'
+    if my == Move.DEFECT and opp == Move.COOPERATE:
+        return 'you protected yourself'
+    return 'both pulled back'
+
+
 def trust_score(history: List[RoundEntry]) -> float:
     if not history:
         return 0.5

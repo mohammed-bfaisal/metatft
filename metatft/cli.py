@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
+from rich.text import Text
 
 from .engine import MetaTFTEngine
 from .models import (
@@ -26,7 +27,7 @@ from .models import (
     TemporalFlag,
 )
 from .storage import export_opponent, import_opponent, load_state, save_state
-from .utils import ascii_bar, cooperation_timeline, get_payoff
+from .utils import ascii_bar, cooperation_timeline, get_payoff, move_symbol, outcome_label, sparkline, trust_score
 
 
 console = Console()
@@ -65,7 +66,8 @@ def header(state: MetaTFTState) -> None:
         f"[dim]A decision system for when to cooperate, when to retaliate, when to forgive, and when to leave.[/dim]\n\n"
         f"Tracked relationships: [bold]{tracked}[/bold]\n"
         f"Open risk alerts: [bold]{risk_alerts}[/bold]\n"
-        f"Simulation seed: [bold]{state.settings.get('sim_seed', 433)}[/bold]",
+        f"Simulation seed: [bold]{state.settings.get('sim_seed', 433)}[/bold]\n"
+        f"Easy language mode: [bold]{'ON' if state.settings.get('easy_mode', True) else 'OFF'}[/bold]",
         title="Adaptive Cooperation Intelligence",
         border_style="dim",
         padding=(1, 2),
@@ -80,6 +82,50 @@ def section(title: str) -> None:
 def module_badge(name: str) -> str:
     color = MODULE_COLORS.get(name, "white")
     return f"[{color}]{name}[/{color}]"
+
+
+def plain_label(value: str) -> str:
+    return value.replace('_', ' ').replace('-', ' ').strip()
+
+
+def pretty_move(move: Move, easy_mode: bool = True) -> str:
+    return (f"{move_symbol(move)} Work with them" if move == Move.COOPERATE else f"{move_symbol(move)} Protect yourself") if easy_mode else move.value.upper()
+
+
+def render_turn_playback(rounds_log: list[dict], easy_mode: bool = True, title: str = "Turn-by-turn view") -> None:
+    if not rounds_log:
+        return
+    table = Table(box=box.SIMPLE_HEAVY, title=title)
+    table.add_column("Turn", justify="right")
+    table.add_column("MetaTFT")
+    table.add_column("Other side")
+    table.add_column("What happened")
+    table.add_column("Points", justify="right")
+    table.add_column("Approach")
+    for row in rounds_log:
+        my_move = Move(row["my_move"]) if isinstance(row["my_move"], str) else row["my_move"]
+        opp_move = Move(row["bot_move"]) if "bot_move" in row else Move(row["opponent_move"]) if isinstance(row.get("opponent_move"), str) else row.get("opponent_move")
+        what = outcome_label(my_move, opp_move) if easy_mode else f"{my_move.value} vs {opp_move.value}"
+        table.add_row(
+            str(row["round"]),
+            pretty_move(my_move, easy_mode),
+            pretty_move(opp_move, easy_mode),
+            what,
+            str(row.get("my_payoff", row.get("payoff", "—"))),
+            module_badge(row["module"]),
+        )
+    console.print(table)
+
+
+def render_visual_strip(rounds_log: list[dict], title: str = "Visual flow") -> None:
+    if not rounds_log:
+        return
+    rounds = ' '.join(f'{r["round"]:02d}' for r in rounds_log)
+    mine = ' '.join(move_symbol(r['my_move']) for r in rounds_log)
+    theirs = ' '.join(move_symbol(r.get('bot_move', r.get('opponent_move'))) for r in rounds_log)
+    score_trace = [float(r.get('my_payoff', r.get('payoff', 0))) for r in rounds_log]
+    line = f"Turns:   {rounds}\nYou:     {mine}\nOther:   {theirs}\nScore:   {sparkline(score_trace, width=min(20, len(score_trace)))}"
+    console.print(Panel(line, title=title, border_style='dim'))
 
 
 def get_or_create_opponent(state: MetaTFTState, prompt_text: str = "Opponent") -> Optional[Opponent]:
@@ -177,7 +223,7 @@ def prompt_overrides() -> tuple[dict, float]:
     return overrides, power_ratio
 
 
-def render_analysis(opp: Opponent, result, signals, gtfo) -> None:
+def render_analysis(state: MetaTFTState, opp: Opponent, result, signals, gtfo) -> None:
     summary = Panel(
         f"[bold]{opp.name}[/bold]\n"
         f"Rounds logged: {len(opp.history)}\n"
@@ -196,16 +242,16 @@ def render_analysis(opp: Opponent, result, signals, gtfo) -> None:
     )
     console.print(Columns([summary, recommendation]))
 
-    signals_table = Table(box=box.SIMPLE_HEAVY, title="Environment Signals", show_header=False)
+    signals_table = Table(box=box.SIMPLE_HEAVY, title="What the app sees" if easy_mode else "Environment Signals", show_header=False)
     signals_table.add_column("Signal", style="bold")
     signals_table.add_column("Value")
-    signals_table.add_row("Horizon", f"{signals.horizon.value}  {ascii_bar(0.9 if signals.horizon != HorizonFlag.UNKNOWN else 0.4)}")
-    signals_table.add_row("Noise", f"{signals.noise.value}  {ascii_bar(signals.misread_risk)}")
-    signals_table.add_row("Players", signals.players.value)
-    signals_table.add_row("Opponent", signals.opponent_type.value)
-    signals_table.add_row("Confidence", f"{signals.confidence:.0%}  {ascii_bar(signals.confidence)}")
+    signals_table.add_row("Will this continue?" if easy_mode else "Horizon", f"{plain_label(signals.horizon.value)}  {ascii_bar(0.9 if signals.horizon != HorizonFlag.UNKNOWN else 0.4)}")
+    signals_table.add_row("Chance of misunderstanding" if easy_mode else "Noise", f"{plain_label(signals.noise.value)}  {ascii_bar(signals.misread_risk)}")
+    signals_table.add_row("Who is involved?" if easy_mode else "Players", plain_label(signals.players.value))
+    signals_table.add_row("Other side pattern" if easy_mode else "Opponent", plain_label(signals.opponent_type.value))
+    signals_table.add_row("How sure is the app?" if easy_mode else "Confidence", f"{signals.confidence:.0%}  {ascii_bar(signals.confidence)}")
 
-    risk_table = Table(box=box.SIMPLE_HEAVY, title="Risk Profile", show_header=False)
+    risk_table = Table(box=box.SIMPLE_HEAVY, title="Risk profile", show_header=False)
     risk_table.add_column("Risk", style="bold")
     risk_table.add_column("Value")
     risk_table.add_row("Exploitation", f"{signals.exploit_risk:.2f}  {ascii_bar(signals.exploit_risk)}")
@@ -217,7 +263,7 @@ def render_analysis(opp: Opponent, result, signals, gtfo) -> None:
 
     console.print(Panel(result.executive_summary + "\n\n" + result.strategic_explanation, title="Why this recommendation?", border_style="dim"))
 
-    evidence = Table(box=box.SIMPLE, title="Technical Evidence")
+    evidence = Table(box=box.SIMPLE, title=evidence_title)
     evidence.add_column("Line")
     for line in result.evidence_lines:
         evidence.add_row(line)
@@ -261,7 +307,7 @@ def analyze_interaction(state: MetaTFTState, save_after: bool = False) -> None:
     questionary.text("Describe what happened (for your own notes):", style=Q_STYLE).ask()
     overrides, power_ratio = prompt_overrides()
     result, signals, gtfo = engine.decide(opp, overrides, power_ratio)
-    render_analysis(opp, result, signals, gtfo)
+    render_analysis(state, opp, result, signals, gtfo)
     if save_after and questionary.confirm("Log a round now?", default=True, style=Q_STYLE).ask():
         log_round(state, opp, result, signals)
 
@@ -322,16 +368,12 @@ def simulate_scenarios(state: MetaTFTState) -> None:
         line = "MetaTFT preserved flexibility across phases." if diff >= 0 else "This bot shape exposed a weakness worth inspecting."
         console.print(Panel(line, title="Interpretation", border_style="dim"))
 
-    if questionary.confirm("Show last 20 rounds?", default=False, style=Q_STYLE).ask():
-        log = Table(box=box.SIMPLE)
-        log.add_column("Rd", justify="right")
-        log.add_column("You")
-        log.add_column("Bot")
-        log.add_column("Payoff", justify="right")
-        log.add_column("Module")
-        for r in sim["rounds_log"][-20:]:
-            log.add_row(str(r["round"]), r["my_move"][0].upper(), r["bot_move"][0].upper(), str(r["my_payoff"]), module_badge(r["module"]))
-        console.print(log)
+    easy_mode = state.settings.get("easy_mode", True)
+    show_turns_default = True if easy_mode else False
+    if questionary.confirm("Show turn-by-turn view?", default=show_turns_default, style=Q_STYLE).ask():
+        recent = sim["rounds_log"][-20:]
+        render_visual_strip(recent, title="Visual flow of the last 20 turns")
+        render_turn_playback(recent, easy_mode=easy_mode, title="What happened each turn")
 
 
 def review_journal(state: MetaTFTState) -> None:
@@ -362,6 +404,8 @@ def review_journal(state: MetaTFTState) -> None:
         console.print(Panel(f"Rounds:   {rounds}\nYou:      {mine}\nOpponent: {theirs}", title="Timeline", border_style="dim"))
 
     if opp.history:
+        recent_visual = [{"round": e.round_num, "my_move": e.my_move.value, "opponent_move": e.opponent_move.value, "payoff": e.payoff, "module": e.active_module} for e in opp.history[-12:]]
+        render_visual_strip([{"round": r["round"], "my_move": r["my_move"], "opponent_move": r["opponent_move"], "payoff": r["payoff"], "module": r["module"]} for r in recent_visual], title="How the last turns looked")
         hist = Table(box=box.SIMPLE_HEAVY, title="Recent rounds")
         hist.add_column("Rd", justify="right")
         hist.add_column("You")
@@ -370,7 +414,7 @@ def review_journal(state: MetaTFTState) -> None:
         hist.add_column("Module")
         hist.add_column("Notes")
         for entry in opp.history[-15:]:
-            hist.add_row(str(entry.round_num), entry.my_move.value[0].upper(), entry.opponent_move.value[0].upper(), str(entry.payoff), module_badge(entry.active_module), entry.context_notes[:24] or "—")
+            hist.add_row(str(entry.round_num), pretty_move(entry.my_move, easy_mode), pretty_move(entry.opponent_move, easy_mode), str(entry.payoff), module_badge(entry.active_module), entry.context_notes[:24] or "—")
         console.print(hist)
 
     action = questionary.select(
@@ -434,10 +478,26 @@ def settings_menu(state: MetaTFTState) -> None:
     t = Table(box=box.SIMPLE_HEAVY)
     t.add_column("Setting")
     t.add_column("Value")
+    labels = {
+        "easy_mode": "Easy language mode",
+        "stochastic_block": "Switch randomness block",
+        "decay_lambda": "Memory decay",
+        "fairness_multiplier": "Fairness multiplier",
+        "re_eval_interval": "Re-check interval",
+        "gtfo_threshold": "Leave threshold",
+        "sim_seed": "Simulation seed",
+    }
     for k, v in state.settings.items():
-        t.add_row(k, str(v))
+        shown = "On" if k == "easy_mode" and v else "Off" if k == "easy_mode" else str(v)
+        t.add_row(labels.get(k, k), shown)
     console.print(t)
-    choice = questionary.select("Change a setting?", choices=[*state.settings.keys(), "Back"], style=Q_STYLE).ask()
+    choice = questionary.select("Change a setting?", choices=["easy_mode", *[k for k in state.settings.keys() if k != "easy_mode"], "Back"], style=Q_STYLE).ask()
+    if choice == "easy_mode":
+        current = state.settings.get("easy_mode", True)
+        state.settings["easy_mode"] = not current
+        save_state(state)
+        console.print(f"[green]Easy language mode is now {'ON' if state.settings['easy_mode'] else 'OFF'}.[/green]")
+        return
     if choice and choice != "Back":
         raw = questionary.text(f"New value for {choice}:", default=str(state.settings[choice]), style=Q_STYLE).ask()
         if raw is not None:

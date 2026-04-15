@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name='metatft',
-    version='3.0.0',
+    version='3.1.0',
     packages=find_packages(),
     install_requires=[
         'rich>=13.7.1',

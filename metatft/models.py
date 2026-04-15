@@ -242,6 +242,7 @@ class MetaTFTState:
         "re_eval_interval": 5,
         "gtfo_threshold": 2.0,
         "sim_seed": 433,
+        "easy_mode": True,
     })
 
     def to_dict(self) -> dict:

@@ -8,6 +8,7 @@ from . import __version__
 from .cli import main as interactive_main
 from .engine import MetaTFTEngine, SCENARIO_PACKS
 from .storage import load_state
+from .utils import move_symbol, sparkline
 
 console = Console()
 
@@ -49,7 +50,15 @@ def run() -> None:
         state = load_state()
         engine = MetaTFTEngine(state)
         res = engine.simulate_pack(args.pack, seed=state.settings.get('sim_seed', 433))
-        console.print(Panel(f"Pack: {args.pack}\nDescription: {res['description']}\nMy total: {res['my_total']}\nBot total: {res['bot_total']}\nMy avg: {res['my_avg']}\nMy coop rate: {res['my_coop_rate']:.0%}", title='Scenario pack result', border_style='magenta'))
+        rounds = res.get('rounds_log', [])[-20:]
+        visual = ''
+        if rounds:
+            turn_ids = ' '.join(f"{r['round']:02d}" for r in rounds)
+            mine = ' '.join(move_symbol(r['my_move']) for r in rounds)
+            theirs = ' '.join(move_symbol(r['bot_move']) for r in rounds)
+            scores = sparkline([float(r['my_payoff']) for r in rounds], width=min(20, len(rounds)))
+            visual = f"\n\nLast turns\nTurns: {turn_ids}\nYou:   {mine}\nOther: {theirs}\nScore: {scores}"
+        console.print(Panel(f"Pack: {args.pack}\nDescription: {res['description']}\nMy total: {res['my_total']}\nBot total: {res['bot_total']}\nMy avg: {res['my_avg']}\nMy coop rate: {res['my_coop_rate']:.0%}{visual}", title='Scenario pack result', border_style='magenta'))
         return
 
 

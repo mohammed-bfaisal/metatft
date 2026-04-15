@@ -40,6 +40,9 @@ class MetaTFTTests(unittest.TestCase):
         self.assertIn('my_total', result)
         self.assertEqual(result['pack'], 'hard_defector')
 
+    def test_easy_mode_defaults_on(self):
+        self.assertTrue(MetaTFTState().settings.get('easy_mode'))
+
 
 if __name__ == '__main__':
     unittest.main()
