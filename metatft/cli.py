@@ -1,77 +1,80 @@
-import sys
+from __future__ import annotations
+
 import random
+import sys
 from typing import Optional
 
 import questionary
 from questionary import Style
+from rich import box
+from rich.columns import Columns
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
-from rich.columns import Columns
 from rich.rule import Rule
-from rich import box
+from rich.table import Table
 
-from .models import (
-    Move, MetaTFTState, Opponent,
-    HorizonFlag, NoiseFlag, PlayerFlag, OpponentFlag, TemporalFlag, ModuleName
-)
 from .engine import MetaTFTEngine
-from .storage import load_state, save_state, export_opponent, import_opponent
-from .utils import get_payoff, project_ev
+from .models import (
+    HorizonFlag,
+    MetaTFTState,
+    ModuleName,
+    Move,
+    NoiseFlag,
+    Opponent,
+    OpponentFlag,
+    PlayerFlag,
+    TemporalFlag,
+)
+from .storage import export_opponent, import_opponent, load_state, save_state
+from .utils import ascii_bar, cooperation_timeline, get_payoff
+
 
 console = Console()
-
 Q_STYLE = Style([
-    ("qmark",     "fg:#5DCAA5 bold"),
-    ("question",  "bold"),
-    ("answer",    "fg:#7F77DD bold"),
-    ("pointer",   "fg:#5DCAA5 bold"),
-    ("highlighted","fg:#5DCAA5 bold"),
-    ("selected",  "fg:#5DCAA5"),
-    ("separator", "fg:#444441"),
-    ("instruction","fg:#888780"),
+    ("qmark", "fg:#5DCAA5 bold"),
+    ("question", "bold"),
+    ("answer", "fg:#7F77DD bold"),
+    ("pointer", "fg:#5DCAA5 bold"),
+    ("highlighted", "fg:#5DCAA5 bold"),
+    ("selected", "fg:#5DCAA5"),
 ])
 
 MODULE_COLORS = {
-    "Base TFT":           "cyan",
-    "Generous TFT":       "green",
-    "Stake-and-Signal":   "yellow",
-    "Pavlov":             "magenta",
-    "Grim-with-Parole":   "red",
-    "Network TFT":        "blue",
-    "Shadow-Extender":    "purple4",
+    "Base TFT": "cyan",
+    "Generous TFT": "green",
+    "Stake-and-Signal": "yellow",
+    "Pavlov": "magenta",
+    "Grim-with-Parole": "red",
+    "Network TFT": "blue",
+    "Shadow-Extender": "purple4",
     "Irrationality Mode": "bright_red",
-    "Commons Mode":       "bright_green",
-    "Power-Asymmetry":    "orange3",
+    "Commons Mode": "bright_green",
+    "Power-Asymmetry": "orange3",
 }
 
-MOVE_COLOR = {Move.COOPERATE: "green", Move.DEFECT: "red"}
-MOVE_ICON  = {Move.COOPERATE: "C", Move.DEFECT: "D"}
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def header():
+def header(state: MetaTFTState) -> None:
+    tracked = len(state.opponents)
+    risk_alerts = 0
+    for opp in state.opponents.values():
+        if opp.cooperation_deficit() > state.settings.get("gtfo_threshold", 2.0):
+            risk_alerts += 1
     console.print()
     console.print(Panel(
-        "[bold]MetaTFT[/bold]  [dim]—  Universal Adaptive Cooperation Strategy[/dim]",
+        f"[bold]MetaTFT[/bold]\n"
+        f"[dim]A decision system for when to cooperate, when to retaliate, when to forgive, and when to leave.[/dim]\n\n"
+        f"Tracked relationships: [bold]{tracked}[/bold]\n"
+        f"Open risk alerts: [bold]{risk_alerts}[/bold]\n"
+        f"Simulation seed: [bold]{state.settings.get('sim_seed', 433)}[/bold]",
+        title="Adaptive Cooperation Intelligence",
         border_style="dim",
-        padding=(0, 2),
+        padding=(1, 2),
     ))
-    console.print()
 
 
-def section(title: str):
+def section(title: str) -> None:
     console.print()
     console.print(Rule(f"[dim]{title}[/dim]", style="dim"))
-    console.print()
-
-
-def move_badge(move: Move) -> str:
-    color = MOVE_COLOR[move]
-    icon = MOVE_ICON[move]
-    return f"[{color} bold]{icon}[/{color} bold]"
 
 
 def module_badge(name: str) -> str:
@@ -79,152 +82,89 @@ def module_badge(name: str) -> str:
     return f"[{color}]{name}[/{color}]"
 
 
-def confidence_bar(score: float, width: int = 20) -> str:
-    filled = int(score * width)
-    bar = "█" * filled + "░" * (width - filled)
-    color = "green" if score >= 0.7 else "yellow" if score >= 0.5 else "red"
-    return f"[{color}]{bar}[/{color}] {score:.0%}"
-
-
-def get_or_create_opponent(state: MetaTFTState, prompt_text: str = "Opponent name") -> Optional[Opponent]:
+def get_or_create_opponent(state: MetaTFTState, prompt_text: str = "Opponent") -> Optional[Opponent]:
     names = list(state.opponents.keys())
-    choices = names + ["[ + Create new ]"]
+    choices = names + ["[ + Create new ]"] if names else ["[ + Create new ]"]
     choice = questionary.select(prompt_text, choices=choices, style=Q_STYLE).ask()
     if choice is None:
         return None
     if choice == "[ + Create new ]":
-        name = questionary.text("Enter a name for this opponent:", style=Q_STYLE).ask()
+        name = questionary.text("Enter a name:", style=Q_STYLE).ask()
         if not name:
             return None
-        name = name.strip()
-        opp = Opponent(name=name)
-        state.opponents[name] = opp
+        opp = Opponent(name=name.strip())
+        state.opponents[opp.name] = opp
         save_state(state)
-        console.print(f"[green]Created opponent:[/green] {name}")
         return opp
     return state.opponents[choice]
 
 
-# ── Mode 1: Advisor ───────────────────────────────────────────────────────────
-
-def advisor_mode(state: MetaTFTState):
-    engine = MetaTFTEngine(state)
-    section("ADVISOR MODE")
-    console.print("[dim]Describe your real situation. MetaTFT will classify the environment and recommend a strategy.[/dim]")
-    console.print()
-
-    opp = get_or_create_opponent(state, "Who are you dealing with?")
-    if opp is None:
-        return
-
-    # Questionnaire
-    console.print()
-    console.print("[dim]Answer a few questions to calibrate the classifier:[/dim]")
-    console.print()
-
-    # Q1: Horizon
+def prompt_overrides() -> tuple[dict, float]:
     horizon_raw = questionary.select(
-        "Will you interact with this person again?",
-        choices=[
-            "Yes, many times (open-ended relationship)",
-            "A few more times (short but repeated)",
-            "Just this one time",
-            "Not sure",
-        ],
+        "How repeated is this interaction?",
+        choices=["Open-ended / repeated", "Short but repeated", "One-shot", "Unknown"],
         style=Q_STYLE,
     ).ask()
-    horizon_map = {
-        "Yes, many times (open-ended relationship)": HorizonFlag.REPEATED,
-        "A few more times (short but repeated)": HorizonFlag.SHORT,
-        "Just this one time": HorizonFlag.ONE_SHOT,
-        "Not sure": HorizonFlag.UNKNOWN,
-    }
-    horizon = horizon_map.get(horizon_raw, HorizonFlag.UNKNOWN)
+    horizon = {
+        "Open-ended / repeated": HorizonFlag.REPEATED,
+        "Short but repeated": HorizonFlag.SHORT,
+        "One-shot": HorizonFlag.ONE_SHOT,
+        "Unknown": HorizonFlag.UNKNOWN,
+    }[horizon_raw]
 
-    # Q2: Noise
     noise_raw = questionary.select(
-        "How clean is communication with them?",
-        choices=[
-            "Very clear — we understand each other well",
-            "Sometimes things get misread or misunderstood",
-            "Frequently unclear, ambiguous signals",
-        ],
+        "How noisy is the channel?",
+        choices=["Clean", "Sometimes misread", "Often ambiguous"],
         style=Q_STYLE,
     ).ask()
     noise_map = {
-        "Very clear — we understand each other well":        (NoiseFlag.LOW,   0.03),
-        "Sometimes things get misread or misunderstood":     (NoiseFlag.NOISY, 0.10),
-        "Frequently unclear, ambiguous signals":             (NoiseFlag.HIGH,  0.25),
+        "Clean": (NoiseFlag.LOW, 0.03),
+        "Sometimes misread": (NoiseFlag.NOISY, 0.10),
+        "Often ambiguous": (NoiseFlag.HIGH, 0.22),
     }
-    noise_flag, noise_est = noise_map.get(noise_raw, (NoiseFlag.LOW, 0.05))
+    noise_flag, noise_est = noise_map[noise_raw]
 
-    # Q3: Players
     players_raw = questionary.select(
-        "Is this purely a 1-on-1 dynamic, or are others watching/involved?",
-        choices=[
-            "Just the two of us — private",
-            "Others can see our behavior (reputation matters)",
-            "Multiple parties all affecting each other",
-            "This affects a shared resource (commons)",
-        ],
+        "What is the player structure?",
+        choices=["Bilateral", "Networked / visible", "Multi-player", "Commons / shared pool"],
         style=Q_STYLE,
     ).ask()
-    players_map = {
-        "Just the two of us — private":                       PlayerFlag.BILATERAL,
-        "Others can see our behavior (reputation matters)":   PlayerFlag.NETWORKED,
-        "Multiple parties all affecting each other":          PlayerFlag.MULTI_PLAYER,
-        "This affects a shared resource (commons)":           PlayerFlag.COLLECTIVE,
-    }
-    players = players_map.get(players_raw, PlayerFlag.BILATERAL)
+    players = {
+        "Bilateral": PlayerFlag.BILATERAL,
+        "Networked / visible": PlayerFlag.NETWORKED,
+        "Multi-player": PlayerFlag.MULTI_PLAYER,
+        "Commons / shared pool": PlayerFlag.COLLECTIVE,
+    }[players_raw]
 
-    # Q4: Opponent type
     opp_raw = questionary.select(
-        "How has this person behaved so far?",
-        choices=[
-            "Mostly cooperative and good faith",
-            "Mixed — sometimes cooperative, sometimes not",
-            "Mostly uncooperative / self-interested",
-            "Consistently hostile or exploitative",
-            "Unpredictable — doesn't seem to respond to incentives",
-        ],
+        "How has the opponent behaved?",
+        choices=["Mostly cooperative", "Mixed", "Conditionally exploitative", "Consistently exploitative", "Unpredictable / irrational"],
         style=Q_STYLE,
     ).ask()
-    opp_map = {
-        "Mostly cooperative and good faith":                         OpponentFlag.COOPERATIVE,
-        "Mixed — sometimes cooperative, sometimes not":              OpponentFlag.MIXED,
-        "Mostly uncooperative / self-interested":                    OpponentFlag.COND_DEFECT,
-        "Consistently hostile or exploitative":                      OpponentFlag.PURE_DEFECT,
-        "Unpredictable — doesn't seem to respond to incentives":     OpponentFlag.IRRATIONAL,
-    }
-    opp_type = opp_map.get(opp_raw, OpponentFlag.UNKNOWN)
+    opp_type = {
+        "Mostly cooperative": OpponentFlag.COOPERATIVE,
+        "Mixed": OpponentFlag.MIXED,
+        "Conditionally exploitative": OpponentFlag.COND_DEFECT,
+        "Consistently exploitative": OpponentFlag.PURE_DEFECT,
+        "Unpredictable / irrational": OpponentFlag.IRRATIONAL,
+    }[opp_raw]
 
-    # Q5: Temporal
     temporal_raw = questionary.select(
-        "What's the time structure of this situation?",
-        choices=[
-            "Open-ended — no fixed deadline",
-            "Has a known end point (contract ends, project finishes, etc.)",
-            "They're impatient or under pressure for quick results",
-            "They have significantly more power than me",
-        ],
+        "What is special about the time structure?",
+        choices=["Open / unknown end", "Known end-date", "Opponent is impatient", "Opponent has much more power"],
         style=Q_STYLE,
     ).ask()
-    temporal_map = {
-        "Open-ended — no fixed deadline":                            TemporalFlag.OPEN,
-        "Has a known end point (contract ends, project finishes, etc.)": TemporalFlag.BOUNDED,
-        "They're impatient or under pressure for quick results":     TemporalFlag.IMPATIENT,
-        "They have significantly more power than me":                TemporalFlag.ASYMMETRIC,
-    }
-    temporal = temporal_map.get(temporal_raw, TemporalFlag.OPEN)
+    temporal = {
+        "Open / unknown end": TemporalFlag.OPEN,
+        "Known end-date": TemporalFlag.BOUNDED,
+        "Opponent is impatient": TemporalFlag.IMPATIENT,
+        "Opponent has much more power": TemporalFlag.ASYMMETRIC,
+    }[temporal_raw]
 
     power_ratio = 1.0
     if temporal == TemporalFlag.ASYMMETRIC:
-        pr_raw = questionary.select(
-            "Roughly how much more power do they have?",
-            choices=["About 2x", "About 3-5x", "Much more than 5x"],
-            style=Q_STYLE,
-        ).ask()
-        power_ratio = {"About 2x": 2.5, "About 3-5x": 4.0, "Much more than 5x": 7.0}.get(pr_raw, 3.0)
+        power_choice = questionary.select("Approximate power gap:", choices=["2x", "3-5x", ">5x"], style=Q_STYLE).ask()
+        power_ratio = {"2x": 2.0, "3-5x": 4.0, ">5x": 6.0}[power_choice]
 
     overrides = {
         "horizon": horizon,
@@ -234,532 +174,310 @@ def advisor_mode(state: MetaTFTState):
         "opponent_type": opp_type,
         "temporal": temporal,
     }
+    return overrides, power_ratio
 
-    # Run engine
-    result, signals, ethics = engine.decide(opp, overrides, power_ratio)
 
-    # ── Display result ────────────────────────────────────────────────────────
-    section("RECOMMENDATION")
+def render_analysis(opp: Opponent, result, signals, gtfo) -> None:
+    summary = Panel(
+        f"[bold]{opp.name}[/bold]\n"
+        f"Rounds logged: {len(opp.history)}\n"
+        f"Defection rate: {opp.defection_rate():.0%}\n"
+        f"Reputation: {opp.reputation_score:.2f}",
+        title="Situation Summary",
+        border_style="dim",
+    )
+    recommendation = Panel(
+        f"Move: [bold]{result.recommended_move.value.upper()}[/bold]\n"
+        f"Policy: {module_badge(result.module.value)}\n"
+        f"Confidence: {result.confidence:.0%}\n"
+        f"GTFO: {'TRIGGERED' if result.gtfo_triggered else 'Not triggered'}",
+        title="Recommendation",
+        border_style="green" if result.recommended_move == Move.COOPERATE else "red",
+    )
+    console.print(Columns([summary, recommendation]))
 
-    move_color = MOVE_COLOR[result.recommended_move]
-    move_word = result.recommended_move.value.upper()
+    signals_table = Table(box=box.SIMPLE_HEAVY, title="Environment Signals", show_header=False)
+    signals_table.add_column("Signal", style="bold")
+    signals_table.add_column("Value")
+    signals_table.add_row("Horizon", f"{signals.horizon.value}  {ascii_bar(0.9 if signals.horizon != HorizonFlag.UNKNOWN else 0.4)}")
+    signals_table.add_row("Noise", f"{signals.noise.value}  {ascii_bar(signals.misread_risk)}")
+    signals_table.add_row("Players", signals.players.value)
+    signals_table.add_row("Opponent", signals.opponent_type.value)
+    signals_table.add_row("Confidence", f"{signals.confidence:.0%}  {ascii_bar(signals.confidence)}")
 
-    console.print(Panel(
-        f"[{move_color} bold]  {move_word}  [/{move_color} bold]",
-        title=f"Recommended Move — {module_badge(result.module.value)}",
-        border_style=move_color,
-        padding=(1, 4),
-    ))
-    console.print()
+    risk_table = Table(box=box.SIMPLE_HEAVY, title="Risk Profile", show_header=False)
+    risk_table.add_column("Risk", style="bold")
+    risk_table.add_column("Value")
+    risk_table.add_row("Exploitation", f"{signals.exploit_risk:.2f}  {ascii_bar(signals.exploit_risk)}")
+    risk_table.add_row("Misread", f"{signals.misread_risk:.2f}  {ascii_bar(signals.misread_risk)}")
+    risk_table.add_row("Endgame", f"{signals.endgame_risk:.2f}  {ascii_bar(signals.endgame_risk)}")
+    risk_table.add_row("Relationship", f"{signals.relationship_value:.2f}  {ascii_bar(signals.relationship_value)}")
+    risk_table.add_row("GTFO score", f"{gtfo['score']:.2f} (threshold {gtfo['threshold']})")
+    console.print(Columns([signals_table, risk_table]))
 
-    # Rationale
-    console.print(f"[bold]Rationale[/bold]")
-    console.print(f"  {result.rationale}")
-    console.print()
+    console.print(Panel(result.executive_summary + "\n\n" + result.strategic_explanation, title="Why this recommendation?", border_style="dim"))
 
-    # Signals table
-    t = Table(box=box.SIMPLE, show_header=True, header_style="dim")
-    t.add_column("Signal", style="dim", width=18)
-    t.add_column("Reading", width=22)
-    t.add_column("Confidence")
-    t.add_row("Horizon",       signals.horizon.value,        "")
-    t.add_row("Noise",         f"{signals.noise.value} (ε={signals.noise_estimate:.2f})", "")
-    t.add_row("Players",       signals.players.value,        "")
-    t.add_row("Opponent type", signals.opponent_type.value,  "")
-    t.add_row("Temporal",      signals.temporal.value,       "")
-    t.add_row("Classifier",    "",                           confidence_bar(signals.confidence))
-    console.print(Panel(t, title="[dim]Environment signals[/dim]", border_style="dim"))
+    evidence = Table(box=box.SIMPLE, title="Technical Evidence")
+    evidence.add_column("Line")
+    for line in result.evidence_lines:
+        evidence.add_row(line)
+    console.print(evidence)
 
-    # Tactical notes
+    action_cols = [
+        Panel("\n".join(f"• {x}" for x in result.action_steps), title="Do this", border_style="green"),
+        Panel("\n".join(f"• {x}" for x in result.avoid_steps), title="Avoid this", border_style="yellow"),
+    ]
+    console.print(Columns(action_cols))
+
+    if result.what_changes:
+        console.print(Panel("\n".join(f"• {x}" for x in result.what_changes), title="What would change the answer?", border_style="blue"))
+    if result.why_not:
+        console.print(Panel("\n".join(f"• {x}" for x in result.why_not), title="Why not the nearest alternatives?", border_style="magenta"))
+
+    comp = Table(box=box.SIMPLE_HEAVY, title="Top candidate modules")
+    comp.add_column("Rank", justify="right")
+    comp.add_column("Module")
+    comp.add_column("Score", justify="right")
+    for idx, cand in enumerate(result.alternatives, start=1):
+        comp.add_row(str(idx), module_badge(cand.module.value), f"{cand.score:.3f}")
+    console.print(comp)
+
+    rounds, mine, theirs = cooperation_timeline(opp.history)
+    if rounds:
+        console.print(Panel(f"Rounds:   {rounds}\nYou:      {mine}\nOpponent: {theirs}", title="Recent timeline", border_style="dim"))
+
     if result.tactical_notes:
-        console.print()
-        console.print("[bold]Tactical notes[/bold]")
-        for note in result.tactical_notes:
-            console.print(f"  [dim]•[/dim] {note}")
-
-    # Flags
-    if result.flags:
-        console.print()
-        flag_str = "  " + "  ".join(f"[yellow]{f}[/yellow]" for f in result.flags)
-        console.print(flag_str)
-
-    # Ethics
-    if ethics.vetoed:
-        console.print()
-        console.print(Panel(
-            f"[red bold]ETHICS VETO TRIGGERED[/red bold]\n{ethics.reason}",
-            border_style="red",
-        ))
-    elif ethics.constraint_triggered == 0:
-        console.print()
-        console.print("[dim]  Ethics layer: all clear[/dim]")
-
-    # GTFO check
-    gtfo = engine.evaluate_gtfo(opp)
-    if gtfo["triggered"]:
-        console.print()
-        console.print(Panel(
-            f"[red bold]GTFO THRESHOLD REACHED[/red bold]\n"
-            f"Score: {gtfo['score']:.2f} > threshold {gtfo['threshold']}\n"
-            f"Cooperation deficit: {gtfo['cooperation_deficit']}\n"
-            f"EV projection: {gtfo['ev_projection']}\n\n"
-            "[yellow]Consider exiting this interaction.[/yellow]",
-            border_style="red",
-            title="Exit Evaluation",
-        ))
-
-    # Log this round?
-    console.print()
-    log_it = questionary.confirm("Log this interaction round?", default=True, style=Q_STYLE).ask()
-    if log_it:
-        opp_move_raw = questionary.select(
-            "What did they actually do?",
-            choices=["Cooperated", "Defected", "Skip / not resolved yet"],
-            style=Q_STYLE,
-        ).ask()
-        if opp_move_raw != "Skip / not resolved yet":
-            opp_move = Move.COOPERATE if opp_move_raw == "Cooperated" else Move.DEFECT
-            my_payoff, _ = get_payoff(result.recommended_move, opp_move)
-            notes = questionary.text("Context notes (optional):", style=Q_STYLE).ask() or ""
-            engine.record_round(opp, result.recommended_move, opp_move, result.module, signals, my_payoff, notes)
-            save_state(state)
-            console.print(f"[green]Round logged.[/green] Payoff: {my_payoff}")
+        console.print(Panel("\n".join(f"• {x}" for x in result.tactical_notes), title="Tactical notes", border_style="dim"))
+    if result.ethics_vetoed:
+        console.print(Panel(result.ethics_reason, title="Ethics veto", border_style="red"))
 
 
-# ── Mode 2: Simulator ─────────────────────────────────────────────────────────
-
-def simulator_mode(state: MetaTFTState):
+def analyze_interaction(state: MetaTFTState, save_after: bool = False) -> None:
     engine = MetaTFTEngine(state)
-    section("SIMULATOR MODE")
-    console.print("[dim]Run MetaTFT against classic game-theory bots and see the results.[/dim]")
-    console.print()
+    section("ANALYZE INTERACTION")
+    opp = get_or_create_opponent(state, "Choose opponent:")
+    if opp is None:
+        return
+    questionary.text("Describe what happened (for your own notes):", style=Q_STYLE).ask()
+    overrides, power_ratio = prompt_overrides()
+    result, signals, gtfo = engine.decide(opp, overrides, power_ratio)
+    render_analysis(opp, result, signals, gtfo)
+    if save_after and questionary.confirm("Log a round now?", default=True, style=Q_STYLE).ask():
+        log_round(state, opp, result, signals)
 
+
+def recommend_next_move(state: MetaTFTState) -> None:
+    analyze_interaction(state, save_after=True)
+
+
+def log_round(state: MetaTFTState, opp: Opponent, result, signals) -> None:
+    my_move = result.recommended_move
+    opp_raw = questionary.select("What did the opponent do?", choices=["Cooperated", "Defected"], style=Q_STYLE).ask()
+    opp_move = Move.COOPERATE if opp_raw == "Cooperated" else Move.DEFECT
+    payoff, _ = get_payoff(my_move, opp_move)
+    notes = questionary.text("Context note (optional):", style=Q_STYLE).ask() or ""
+    engine = MetaTFTEngine(state)
+    engine.record_round(opp, my_move, opp_move, result.module, signals, payoff, notes)
+    save_state(state)
+    console.print(f"[green]Round saved.[/green] Round {len(opp.history)} | payoff {payoff}")
+
+
+def simulate_scenarios(state: MetaTFTState) -> None:
+    engine = MetaTFTEngine(state)
+    section("SIMULATE SCENARIOS")
     bot = questionary.select(
         "Choose opponent bot:",
-        choices=[
-            "always_cooperate  — always cooperates",
-            "always_defect     — always defects",
-            "random            — 50/50 random",
-            "tft               — classic Tit-for-Tat",
-            "grudger           — cooperates until first defect, then never again",
-            "detective         — probes then exploits if you don't retaliate",
-        ],
+        choices=["always_cooperate", "always_defect", "random", "tft", "grudger", "detective"],
         style=Q_STYLE,
     ).ask()
-    bot_name = bot.split()[0]
-
-    rounds = questionary.text("Number of rounds (default 50):", default="50", style=Q_STYLE).ask()
-    try:
-        rounds = int(rounds)
-    except ValueError:
-        rounds = 50
-
-    noise_raw = questionary.select(
-        "Channel noise level:",
-        choices=["None (ε=0)", "Low (ε=0.05)", "Moderate (ε=0.10)", "High (ε=0.20)"],
-        style=Q_STYLE,
-    ).ask()
-    noise_map = {"None (ε=0)": 0.0, "Low (ε=0.05)": 0.05, "Moderate (ε=0.10)": 0.10, "High (ε=0.20)": 0.20}
-    noise = noise_map.get(noise_raw, 0.0)
-
-    console.print()
-    with console.status(f"[dim]Simulating {rounds} rounds vs {bot_name}...[/dim]"):
-        sim = engine.simulate(bot_name, rounds, noise)
-
+    rounds = int(questionary.text("Rounds:", default="50", style=Q_STYLE).ask() or "50")
+    noise = float(questionary.select("Noise:", choices=["0.0", "0.05", "0.10", "0.20"], style=Q_STYLE).ask())
+    compare = questionary.confirm("Also compare baseline TFT view verbally?", default=True, style=Q_STYLE).ask()
+    sim = engine.simulate(bot, rounds, noise, seed=state.settings.get("sim_seed", 433))
     if "error" in sim:
         console.print(f"[red]{sim['error']}[/red]")
         return
 
-    # Results panel
-    result_color = "green" if sim["my_total"] >= sim["bot_total"] else "red"
-    diff = sim["my_total"] - sim["bot_total"]
-    diff_str = f"[green]+{diff}[/green]" if diff >= 0 else f"[red]{diff}[/red]"
-
-    console.print(Panel(
-        f"MetaTFT vs [bold]{bot_name}[/bold]  |  {rounds} rounds  |  noise ε={noise}",
-        border_style="dim",
-    ))
-    console.print()
-
-    # Score table
-    t = Table(box=box.SIMPLE, show_header=True, header_style="dim", width=60)
-    t.add_column("", style="bold", width=14)
-    t.add_column("Total score", justify="right")
-    t.add_column("Avg/round", justify="right")
-    t.add_column("Coop rate", justify="right")
-    t.add_row(
-        "MetaTFT",
-        f"[{result_color}]{sim['my_total']}[/{result_color}]",
-        str(sim["my_avg"]),
-        f"{sim['my_coop_rate']:.0%}",
-    )
-    t.add_row(
-        bot_name,
-        str(sim["bot_total"]),
-        str(sim["bot_avg"]),
-        f"{sim['bot_coop_rate']:.0%}",
-    )
+    t = Table(box=box.SIMPLE_HEAVY, title="Simulation Summary")
+    t.add_column("Metric")
+    t.add_column("MetaTFT", justify="right")
+    t.add_column(bot, justify="right")
+    t.add_row("Total score", str(sim["my_total"]), str(sim["bot_total"]))
+    t.add_row("Avg/round", str(sim["my_avg"]), str(sim["bot_avg"]))
+    t.add_row("Coop rate", f"{sim['my_coop_rate']:.0%}", f"{sim['bot_coop_rate']:.0%}")
     console.print(t)
-    console.print(f"  Score difference: {diff_str}")
-    console.print()
 
-    # Module usage breakdown
-    module_counts: dict = {}
+    module_counts = {}
     for entry in sim["rounds_log"]:
-        m = entry["module"]
-        module_counts[m] = module_counts.get(m, 0) + 1
+        module_counts[entry["module"]] = module_counts.get(entry["module"], 0) + 1
+    usage = Table(box=box.SIMPLE, title="Module usage")
+    usage.add_column("Module")
+    usage.add_column("Count", justify="right")
+    for module, count in sorted(module_counts.items(), key=lambda x: -x[1]):
+        usage.add_row(module_badge(module), str(count))
+    console.print(usage)
 
-    console.print("[bold]Module usage[/bold]")
-    for m, count in sorted(module_counts.items(), key=lambda x: -x[1]):
-        bar = "█" * int(count / rounds * 30)
-        color = MODULE_COLORS.get(m, "white")
-        console.print(f"  [{color}]{m:<22}[/{color}]  {bar} {count}")
+    if compare:
+        diff = sim["my_total"] - sim["bot_total"]
+        line = "MetaTFT preserved flexibility across phases." if diff >= 0 else "This bot shape exposed a weakness worth inspecting."
+        console.print(Panel(line, title="Interpretation", border_style="dim"))
 
-    # Show last 10 rounds
-    console.print()
-    show_log = questionary.confirm("Show round-by-round log (last 20)?", default=False, style=Q_STYLE).ask()
-    if show_log:
-        t2 = Table(box=box.SIMPLE, show_header=True, header_style="dim")
-        t2.add_column("Rd", width=4)
-        t2.add_column("MetaTFT", width=10)
-        t2.add_column("Bot", width=10)
-        t2.add_column("My +", width=6)
-        t2.add_column("Module", width=22)
-        for entry in sim["rounds_log"][-20:]:
-            mc = "green" if entry["my_move"] == "cooperate" else "red"
-            bc = "green" if entry["bot_move"] == "cooperate" else "red"
-            t2.add_row(
-                str(entry["round"]),
-                f"[{mc}]{entry['my_move'][0].upper()}[/{mc}]",
-                f"[{bc}]{entry['bot_move'][0].upper()}[/{bc}]",
-                str(entry["my_payoff"]),
-                module_badge(entry["module"]),
-            )
-        console.print(t2)
+    if questionary.confirm("Show last 20 rounds?", default=False, style=Q_STYLE).ask():
+        log = Table(box=box.SIMPLE)
+        log.add_column("Rd", justify="right")
+        log.add_column("You")
+        log.add_column("Bot")
+        log.add_column("Payoff", justify="right")
+        log.add_column("Module")
+        for r in sim["rounds_log"][-20:]:
+            log.add_row(str(r["round"]), r["my_move"][0].upper(), r["bot_move"][0].upper(), str(r["my_payoff"]), module_badge(r["module"]))
+        console.print(log)
 
 
-# ── Mode 3: Journal ───────────────────────────────────────────────────────────
-
-def journal_mode(state: MetaTFTState):
-    section("JOURNAL MODE")
-    console.print("[dim]View and manage your interaction history with tracked opponents.[/dim]")
-    console.print()
-
-    while True:
-        action = questionary.select(
-            "Journal action:",
-            choices=[
-                "View opponent history",
-                "Add manual round entry",
-                "View GTFO evaluation",
-                "Edit opponent notes",
-                "Set opponent reputation score",
-                "Delete opponent",
-                "Export opponent data",
-                "Back to main menu",
-            ],
-            style=Q_STYLE,
-        ).ask()
-
-        if action is None or action == "Back to main menu":
-            break
-        elif action == "View opponent history":
-            _journal_view(state)
-        elif action == "Add manual round entry":
-            _journal_add_entry(state)
-        elif action == "View GTFO evaluation":
-            _journal_gtfo(state)
-        elif action == "Edit opponent notes":
-            _journal_notes(state)
-        elif action == "Set opponent reputation score":
-            _journal_reputation(state)
-        elif action == "Delete opponent":
-            _journal_delete(state)
-        elif action == "Export opponent data":
-            _journal_export(state)
-
-
-def _journal_view(state: MetaTFTState):
+def review_journal(state: MetaTFTState) -> None:
+    section("RELATIONSHIP JOURNAL")
     if not state.opponents:
-        console.print("[dim]No opponents tracked yet.[/dim]")
+        console.print("[dim]No tracked relationships yet.[/dim]")
         return
-    opp = get_or_create_opponent(state, "View history for:")
-    if opp is None:
-        return
-
-    console.print()
-    console.print(Panel(
-        f"[bold]{opp.name}[/bold]\n"
-        f"Rounds logged: {len(opp.history)}\n"
-        f"Classification: [yellow]{opp.classification.value}[/yellow]\n"
-        f"Defection rate (last 10): [red]{opp.defection_rate():.1%}[/red]\n"
-        f"Cooperation deficit: {opp.cooperation_deficit():.2f}\n"
-        f"Reputation score: {opp.reputation_score:.2f}\n"
-        f"Notes: [dim]{opp.notes or 'none'}[/dim]",
-        title="Opponent profile",
-        border_style="dim",
-    ))
-    console.print()
-
-    if not opp.history:
-        console.print("[dim]No rounds logged yet.[/dim]")
-        return
-
-    t = Table(box=box.SIMPLE, show_header=True, header_style="dim")
-    t.add_column("Rd", width=4)
-    t.add_column("Mine", width=6)
-    t.add_column("Theirs", width=8)
-    t.add_column("Payoff", width=8)
-    t.add_column("Module", width=22)
-    t.add_column("Notes", width=20)
-
-    for entry in opp.history[-30:]:
-        mc = "green" if entry.my_move == Move.COOPERATE else "red"
-        oc = "green" if entry.opponent_move == Move.COOPERATE else "red"
-        t.add_row(
-            str(entry.round_num),
-            f"[{mc}]{entry.my_move.value[0].upper()}[/{mc}]",
-            f"[{oc}]{entry.opponent_move.value[0].upper()}[/{oc}]",
-            str(entry.payoff),
-            module_badge(entry.active_module),
-            entry.context_notes[:18] or "[dim]—[/dim]",
-        )
-    console.print(t)
-    if len(opp.history) > 30:
-        console.print(f"[dim]Showing last 30 of {len(opp.history)} rounds.[/dim]")
-
-    ev = project_ev(opp.history)
-    console.print(f"\n  [dim]EV projection (next 10 rounds): {ev}[/dim]")
-
-
-def _journal_add_entry(state: MetaTFTState):
-    opp = get_or_create_opponent(state, "Add entry for:")
-    if opp is None:
-        return
-    engine = MetaTFTEngine(state)
-    signals = engine.classify_environment(opp)
-
-    my_raw = questionary.select("Your move:", choices=["Cooperated", "Defected"], style=Q_STYLE).ask()
-    opp_raw = questionary.select("Their move:", choices=["Cooperated", "Defected"], style=Q_STYLE).ask()
-    notes = questionary.text("Context notes (optional):", style=Q_STYLE).ask() or ""
-
-    my_move = Move.COOPERATE if my_raw == "Cooperated" else Move.DEFECT
-    opp_move = Move.COOPERATE if opp_raw == "Cooperated" else Move.DEFECT
-    payoff, _ = get_payoff(my_move, opp_move)
-
-    engine.record_round(opp, my_move, opp_move, from_string_to_module(opp.classification), signals, payoff, notes)
-    save_state(state)
-    console.print(f"[green]Entry logged.[/green] Round {len(opp.history)}  payoff: {payoff}")
-
-
-def from_string_to_module(classification):
-    """Map opponent classification to most likely module for manual entries."""
-    from .models import ModuleName, OpponentFlag
-    m = {
-        OpponentFlag.COOPERATIVE: ModuleName.BASE_TFT,
-        OpponentFlag.MIXED: ModuleName.BASE_TFT,
-        OpponentFlag.COND_DEFECT: ModuleName.GRIM_WITH_PAROLE,
-        OpponentFlag.PURE_DEFECT: ModuleName.GRIM_WITH_PAROLE,
-        OpponentFlag.IRRATIONAL: ModuleName.IRRATIONALITY_MODE,
-        OpponentFlag.UNKNOWN: ModuleName.BASE_TFT,
-    }
-    return m.get(classification, ModuleName.BASE_TFT)
-
-
-def _journal_gtfo(state: MetaTFTState):
-    opp = get_or_create_opponent(state, "GTFO evaluation for:")
+    opp = get_or_create_opponent(state, "Select relationship:")
     if opp is None:
         return
     engine = MetaTFTEngine(state)
     gtfo = engine.evaluate_gtfo(opp)
-    color = "red" if gtfo["triggered"] else "green"
-    verdict = "EXIT RECOMMENDED" if gtfo["triggered"] else "Staying is rational"
-    console.print()
-    console.print(Panel(
-        f"[{color} bold]{verdict}[/{color} bold]\n\n"
-        f"GTFO score:          {gtfo['score']:.3f}\n"
-        f"Threshold:           {gtfo['threshold']}\n"
-        f"Cooperation deficit: {gtfo['cooperation_deficit']}\n"
-        f"EV projection:       {gtfo['ev_projection']}\n"
-        f"Horizon assumed:     {gtfo['horizon_assumed']} rounds",
-        title=f"GTFO Evaluation — {opp.name}",
-        border_style=color,
-    ))
+    profile = Panel(
+        f"[bold]{opp.name}[/bold]\n"
+        f"Rounds: {len(opp.history)}\n"
+        f"Classification: {opp.classification.value}\n"
+        f"Defection rate: {opp.defection_rate():.0%}\n"
+        f"Cooperation deficit: {opp.cooperation_deficit():.2f}\n"
+        f"Reputation: {opp.reputation_score:.2f}\n"
+        f"GTFO score: {gtfo['score']:.2f}",
+        title="Opponent Profile",
+        border_style="dim",
+    )
+    console.print(profile)
 
+    rounds, mine, theirs = cooperation_timeline(opp.history, width=20)
+    if rounds:
+        console.print(Panel(f"Rounds:   {rounds}\nYou:      {mine}\nOpponent: {theirs}", title="Timeline", border_style="dim"))
 
-def _journal_notes(state: MetaTFTState):
-    if not state.opponents:
-        return
-    opp = get_or_create_opponent(state, "Edit notes for:")
-    if opp is None:
-        return
-    notes = questionary.text(
-        "Notes (add CATEGORICAL_HARM to trigger ethics Constraint 3):",
-        default=opp.notes,
+    if opp.history:
+        hist = Table(box=box.SIMPLE_HEAVY, title="Recent rounds")
+        hist.add_column("Rd", justify="right")
+        hist.add_column("You")
+        hist.add_column("Opp")
+        hist.add_column("Payoff", justify="right")
+        hist.add_column("Module")
+        hist.add_column("Notes")
+        for entry in opp.history[-15:]:
+            hist.add_row(str(entry.round_num), entry.my_move.value[0].upper(), entry.opponent_move.value[0].upper(), str(entry.payoff), module_badge(entry.active_module), entry.context_notes[:24] or "—")
+        console.print(hist)
+
+    action = questionary.select(
+        "Journal action:",
+        choices=["Add manual round", "Edit notes", "Set reputation", "Export opponent", "Import opponent", "Delete opponent", "Back"],
         style=Q_STYLE,
     ).ask()
-    if notes is not None:
-        opp.notes = notes
+    if action == "Add manual round":
+        my_raw = questionary.select("Your move:", choices=["Cooperated", "Defected"], style=Q_STYLE).ask()
+        opp_raw = questionary.select("Opponent move:", choices=["Cooperated", "Defected"], style=Q_STYLE).ask()
+        my_move = Move.COOPERATE if my_raw == "Cooperated" else Move.DEFECT
+        opp_move = Move.COOPERATE if opp_raw == "Cooperated" else Move.DEFECT
+        notes = questionary.text("Notes:", style=Q_STYLE).ask() or ""
+        payoff, _ = get_payoff(my_move, opp_move)
+        signals = engine.classify_environment(opp)
+        engine.record_round(opp, my_move, opp_move, ModuleName.BASE_TFT, signals, payoff, notes)
         save_state(state)
-        console.print("[green]Notes saved.[/green]")
-
-
-def _journal_reputation(state: MetaTFTState):
-    if not state.opponents:
-        return
-    opp = get_or_create_opponent(state, "Set reputation for:")
-    if opp is None:
-        return
-    raw = questionary.text(
-        f"Reputation score 0.0–1.0 (current: {opp.reputation_score:.2f}):",
-        style=Q_STYLE,
-    ).ask()
-    try:
-        val = float(raw)
-        val = max(0.0, min(1.0, val))
-        opp.reputation_score = val
+    elif action == "Edit notes":
+        opp.notes = questionary.text("Notes:", default=opp.notes, style=Q_STYLE).ask() or ""
         save_state(state)
-        console.print(f"[green]Reputation set to {val:.2f}[/green]")
-    except (ValueError, TypeError):
-        console.print("[red]Invalid value.[/red]")
-
-
-def _journal_delete(state: MetaTFTState):
-    if not state.opponents:
-        return
-    names = list(state.opponents.keys())
-    name = questionary.select("Delete opponent:", choices=names + ["Cancel"], style=Q_STYLE).ask()
-    if name and name != "Cancel":
-        confirm = questionary.confirm(f"Delete all history for '{name}'?", default=False, style=Q_STYLE).ask()
-        if confirm:
-            del state.opponents[name]
+    elif action == "Set reputation":
+        opp.reputation_score = max(0.0, min(1.0, float(questionary.text("Reputation 0.0-1.0:", default=f"{opp.reputation_score:.2f}", style=Q_STYLE).ask() or opp.reputation_score)))
+        save_state(state)
+    elif action == "Export opponent":
+        path = export_opponent(opp)
+        console.print(f"[green]Exported:[/green] {path}")
+    elif action == "Import opponent":
+        path = questionary.text("Path to exported JSON:", style=Q_STYLE).ask()
+        if path:
+            imported = import_opponent(path)
+            state.opponents[imported.name] = imported
             save_state(state)
-            console.print(f"[green]Deleted {name}.[/green]")
+    elif action == "Delete opponent":
+        if questionary.confirm(f"Delete {opp.name}?", default=False, style=Q_STYLE).ask():
+            del state.opponents[opp.name]
+            save_state(state)
 
 
-def _journal_export(state: MetaTFTState):
-    if not state.opponents:
-        return
-    opp = get_or_create_opponent(state, "Export:")
-    if opp is None:
-        return
-    path = questionary.text(
-        "Export path (e.g. ~/Desktop/export.json):",
-        default=f"./{opp.name.replace(' ','_')}.json",
+def learn_model(_: MetaTFTState) -> None:
+    section("LEARN / EXPLAIN")
+    topic = questionary.select(
+        "Choose a concept:",
+        choices=["Why plain TFT works", "Why plain TFT fails", "What MetaTFT changes", "Module glossary", "Three-question shorthand"],
         style=Q_STYLE,
     ).ask()
-    if path:
-        import os
-        path = os.path.expanduser(path)
-        export_opponent(state, opp.name, path)
-        console.print(f"[green]Exported to {path}[/green]")
+    if topic == "Why plain TFT works":
+        text = "Tit for Tat works best in repeated, legible, bilateral environments because it is nice, retaliatory, forgiving, and easy to learn."
+    elif topic == "Why plain TFT fails":
+        text = "It breaks under noise, one-shot games, fixed end dates, strong power asymmetry, irrational actors, and multi-player commons problems."
+    elif topic == "What MetaTFT changes":
+        text = "MetaTFT treats TFT as a baseline, not a religion. It classifies the environment first, then decides whether to keep TFT, soften it, wrap it, suspend it, or exit the game."
+    elif topic == "Module glossary":
+        text = "Base TFT: clean reciprocity. Generous TFT: noise correction. Stake-and-Signal: short horizon. Pavlov: impatience accelerator. Grim-with-Parole: contain defectors. Network TFT: reputation-weighted play. Shadow-Extender: bounded games. Irrationality Mode: minimize exposure. Commons Mode: protect the shared pool. Power-Asymmetry: soften retaliation when the opponent can crush you."
+    else:
+        text = "Ask: Will this repeat? Could this be noise? Can I afford retaliation? If repeated and clean, use TFT. If noisy, forgive once. If short-horizon, demand a signal. If exploitative, contain. If hopeless, leave."
+    console.print(Panel(text, border_style="dim"))
 
 
-# ── Mode 4: Settings ──────────────────────────────────────────────────────────
-
-def settings_mode(state: MetaTFTState):
+def settings_menu(state: MetaTFTState) -> None:
     section("SETTINGS")
-    s = state.settings
-    console.print(f"  stochastic_block    {s['stochastic_block']}   [dim](% chance to NOT switch module even when signal fires)[/dim]")
-    console.print(f"  decay_lambda        {s['decay_lambda']}   [dim](memory decay — lower = forget faster)[/dim]")
-    console.print(f"  fairness_multiplier {s['fairness_multiplier']}   [dim](max ratio of your gain to their gain)[/dim]")
-    console.print(f"  re_eval_interval    {s['re_eval_interval']}   [dim](rounds between module re-evaluations)[/dim]")
-    console.print(f"  gtfo_threshold      {s['gtfo_threshold']}   [dim](exit score above which exit is recommended)[/dim]")
-    console.print()
-
-    edit = questionary.confirm("Edit settings?", default=False, style=Q_STYLE).ask()
-    if not edit:
-        return
-
-    for key in s:
-        raw = questionary.text(f"{key} (current: {s[key]}):", default=str(s[key]), style=Q_STYLE).ask()
-        try:
-            s[key] = float(raw)
-        except (ValueError, TypeError):
-            pass
-    save_state(state)
-    console.print("[green]Settings saved.[/green]")
-
-
-# ── Mode 5: Heuristic Shorthand ───────────────────────────────────────────────
-
-def heuristic_mode():
-    section("HEURISTIC SHORTHAND")
-    console.print(Panel(
-        "[bold]Before any move, ask three things:[/bold]\n\n"
-        "[cyan]1.[/cyan] [bold]Will I interact with this person again, and does the future matter to them?[/bold]\n"
-        "   If no: signal honestly and exit if not reciprocated.\n\n"
-        "[cyan]2.[/cyan] [bold]Am I reading them accurately, or is this situation messy?[/bold]\n"
-        "   If messy: be more forgiving than you feel you should be.\n\n"
-        "[cyan]3.[/cyan] [bold]Are the rules of this game fair and bilateral?[/bold]\n"
-        "   If not: stop trying to win the game; start trying to change it.\n\n"
-        "[dim]Otherwise: cooperate first, mirror what you receive,\n"
-        "forgive once, punish consistently, and stay legible.[/dim]",
-        title="MetaTFT in three questions",
-        border_style="cyan",
-        padding=(1, 2),
-    ))
-    console.print()
-    console.print("[bold]The 10 modules at a glance:[/bold]")
-    console.print()
-    rows = [
-        ("Base TFT",           "Clean iterated bilateral game",                      "cyan"),
-        ("Generous TFT",       "Noisy / ambiguous channel",                          "green"),
-        ("Stake-and-Signal",   "One-shot / single encounter",                        "yellow"),
-        ("Pavlov",             "Impatient opponent, need quick lock-in",             "magenta"),
-        ("Grim-with-Parole",   "Pure defector, schedule resets",                     "red"),
-        ("Network TFT",        "Multi-player, reputation is the asset",              "blue"),
-        ("Shadow-Extender",    "Known end date, prevent backward induction",         "purple4"),
-        ("Irrationality Mode", "Opponent ignores incentives, minimize exposure",     "bright_red"),
-        ("Commons Mode",       "Public goods / collective resource game",            "bright_green"),
-        ("Power-Asymmetry",    "Opponent has far more structural power",             "orange3"),
-    ]
-    t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
-    t.add_column("Module", width=22)
-    t.add_column("When to use", width=42)
-    for name, when, color in rows:
-        t.add_row(f"[{color}]{name}[/{color}]", f"[dim]{when}[/dim]")
+    t = Table(box=box.SIMPLE_HEAVY)
+    t.add_column("Setting")
+    t.add_column("Value")
+    for k, v in state.settings.items():
+        t.add_row(k, str(v))
     console.print(t)
+    choice = questionary.select("Change a setting?", choices=[*state.settings.keys(), "Back"], style=Q_STYLE).ask()
+    if choice and choice != "Back":
+        raw = questionary.text(f"New value for {choice}:", default=str(state.settings[choice]), style=Q_STYLE).ask()
+        if raw is not None:
+            try:
+                state.settings[choice] = int(raw) if raw.isdigit() else float(raw)
+            except ValueError:
+                state.settings[choice] = raw
+            save_state(state)
 
 
-# ── Main menu ─────────────────────────────────────────────────────────────────
-
-def main():
+def main() -> None:
+    random.seed(433)
     state = load_state()
-    header()
-
     while True:
-        n_opponents = len(state.opponents)
-        n_rounds = sum(len(o.history) for o in state.opponents.values())
-
-        console.print(f"[dim]  {n_opponents} opponent(s) tracked  ·  {n_rounds} rounds logged[/dim]")
-        console.print()
-
+        header(state)
         choice = questionary.select(
-            "What would you like to do?",
+            "Choose an action:",
             choices=[
-                "Advisor    — get a move recommendation for a real situation",
-                "Simulator  — run MetaTFT against classic bots",
-                "Journal    — view and manage interaction history",
-                "Heuristic  — quick-reference guide",
-                "Settings   — configure engine parameters",
-                "Quit",
+                "Analyze an interaction",
+                "Get a next-move recommendation",
+                "Simulate scenarios",
+                "Review relationship journal",
+                "Learn the model",
+                "Settings",
+                "Exit",
             ],
             style=Q_STYLE,
         ).ask()
-
-        if choice is None or choice.startswith("Quit"):
-            console.print()
+        if choice is None or choice == "Exit":
             console.print("[dim]Goodbye.[/dim]")
-            console.print()
             sys.exit(0)
-        elif choice.startswith("Advisor"):
-            advisor_mode(state)
-        elif choice.startswith("Simulator"):
-            simulator_mode(state)
-        elif choice.startswith("Journal"):
-            journal_mode(state)
-        elif choice.startswith("Heuristic"):
-            heuristic_mode()
-        elif choice.startswith("Settings"):
-            settings_mode(state)
+        if choice == "Analyze an interaction":
+            analyze_interaction(state, save_after=False)
+        elif choice == "Get a next-move recommendation":
+            recommend_next_move(state)
+        elif choice == "Simulate scenarios":
+            simulate_scenarios(state)
+        elif choice == "Review relationship journal":
+            review_journal(state)
+        elif choice == "Learn the model":
+            learn_model(state)
+        elif choice == "Settings":
+            settings_menu(state)

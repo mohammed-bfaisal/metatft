@@ -1,73 +1,61 @@
+from __future__ import annotations
+
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
-from .models import Move, ModuleName, Opponent, EnvironmentSignals, OpponentFlag
-from .utils import (
-    compute_forgiveness_rate, noise_authenticity_test,
-    estimate_noise, compute_parole_interval
-)
+
+from .models import Move, ModuleName, Opponent, EnvironmentSignals
+from .utils import compute_forgiveness_rate, noise_authenticity_test, compute_parole_interval, power_ratio_mode
 
 
 @dataclass
-class ModuleResult:
+class ModulePlan:
     module: ModuleName
-    recommended_move: Move
+    move: Move
     rationale: str
     confidence: float
-    tactical_notes: list
-    flags: list
+    tactical_notes: List[str] = field(default_factory=list)
+    flags: List[str] = field(default_factory=list)
+    action_style: str = "standard"
+
+
+@dataclass
+class ModifierOutcome:
+    move: Move
+    notes: List[str] = field(default_factory=list)
+    flags: List[str] = field(default_factory=list)
 
 
 def _last_opp_move(opponent: Opponent) -> Optional[Move]:
-    if opponent.history:
-        return opponent.history[-1].opponent_move
-    return None
+    return opponent.history[-1].opponent_move if opponent.history else None
 
 
 def _last_my_move(opponent: Opponent) -> Optional[Move]:
-    if opponent.history:
-        return opponent.history[-1].my_move
-    return None
+    return opponent.history[-1].my_move if opponent.history else None
 
 
-# ── Module 1: Base TFT ────────────────────────────────────────────────────────
-def base_tft(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
+def base_tft(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
     last = _last_opp_move(opponent)
     if last is None:
         move = Move.COOPERATE
-        rationale = "Round 1: always cooperate first (niceness principle)."
+        rationale = "Start nice: cooperate first to test for reciprocal upside."
     elif last == Move.COOPERATE:
         move = Move.COOPERATE
-        rationale = "Opponent cooperated last round. Mirror with cooperation."
+        rationale = "Clean reciprocal loop detected, so mirror cooperation."
     else:
         move = Move.DEFECT
-        rationale = "Opponent defected last round. Mirror with defection (provocability)."
-
-    return ModuleResult(
-        module=ModuleName.BASE_TFT,
-        recommended_move=move,
-        rationale=rationale,
-        confidence=0.90,
-        tactical_notes=[
-            "Clean iterated game detected — pure mirroring is optimal.",
-            "Re-evaluate if noise or end-date signals emerge.",
-        ],
-        flags=[],
-    )
+        rationale = "Opponent defected last round in a clean bilateral loop, so retaliate once."
+    return ModulePlan(ModuleName.BASE_TFT, move, rationale, 0.88, ["Baseline policy for clean repeated bilateral play."], [])
 
 
-# ── Module 2: Generous TFT ────────────────────────────────────────────────────
-def generous_tft(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
+def generous_tft(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
     genuine_noise = noise_authenticity_test(opponent.history)
-    forgive_rate = compute_forgiveness_rate(signals.noise_estimate, genuine_noise)
-
+    p = compute_forgiveness_rate(signals.noise_estimate, genuine_noise)
     last = _last_opp_move(opponent)
-    flags = []
-
+    flags: List[str] = []
     if not genuine_noise:
-        flags.append("NOISE_AUTHENTICITY_FAIL: defections appear clustered, not random — reducing forgiveness")
+        flags.append("NOISE_MAY_BE_STRATEGIC")
 
-    # Check for 3 consecutive defections (override forgiveness)
     consecutive_defects = 0
     for entry in reversed(opponent.history[-3:]):
         if entry.opponent_move == Move.DEFECT:
@@ -77,319 +65,162 @@ def generous_tft(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResul
 
     if consecutive_defects >= 3:
         move = Move.DEFECT
-        rationale = f"3 consecutive defections detected — forgiveness suspended. Punishing despite noisy channel."
+        rationale = "Three consecutive defections override noise forgiveness."
         flags.append("CONSECUTIVE_DEFECT_OVERRIDE")
+    elif last == Move.DEFECT and random.random() < p:
+        move = Move.COOPERATE
+        rationale = f"Forgive once under noisy conditions (p={p:.2f}) to avoid a false retaliation spiral."
     elif last == Move.DEFECT:
-        if random.random() < forgive_rate:
-            move = Move.COOPERATE
-            rationale = f"Opponent defected, but channel noise detected (ε≈{signals.noise_estimate:.2f}). Applying forgiveness (p={forgive_rate:.2f}) — cooperating."
-        else:
-            move = Move.DEFECT
-            rationale = f"Opponent defected. Noise forgiveness roll failed (p={forgive_rate:.2f}) — defecting."
-    elif last is None or last == Move.COOPERATE:
-        move = Move.COOPERATE
-        rationale = "Opponent cooperated (or round 1). Cooperating."
+        move = Move.DEFECT
+        rationale = f"Defect this round because the forgiveness gate did not fire (p={p:.2f})."
     else:
         move = Move.COOPERATE
-        rationale = "Defaulting to cooperation under noisy conditions."
+        rationale = "Noisy environment but no clear exploit signal, so preserve cooperation."
 
-    return ModuleResult(
-        module=ModuleName.GENEROUS_TFT,
-        recommended_move=move,
-        rationale=rationale,
-        confidence=0.75,
-        tactical_notes=[
-            f"Noise estimate: ε = {signals.noise_estimate:.3f}",
-            f"Forgiveness rate: p = {forgive_rate:.3f}",
-            "Genuine noise: " + ("YES" if genuine_noise else "NO — may be strategic"),
-            "3 consecutive defections always override forgiveness.",
-        ],
-        flags=flags,
+    return ModulePlan(
+        ModuleName.GENEROUS_TFT,
+        move,
+        rationale,
+        0.76,
+        [f"Noise estimate ε≈{signals.noise_estimate:.2f}", f"Noise authenticity: {'genuine' if genuine_noise else 'suspicious'}"],
+        flags,
+        action_style="guarded_probe",
     )
 
 
-# ── Module 3: Stake-and-Signal ────────────────────────────────────────────────
-def stake_and_signal(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
-    rounds_played = len(opponent.history)
-
-    if rounds_played == 0:
+def stake_and_signal(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
+    last = _last_opp_move(opponent)
+    if last is None:
         move = Move.COOPERATE
-        rationale = "Round 1 of one-shot game: open with a costly signal (cooperation + commitment)."
-        notes = [
-            "Lead with a verifiable commitment — something irrational to offer if you intend to defect.",
-            "Examples: deposit, public statement, escrow, information surrender.",
-            "Signal cost must exceed gain from defecting after signal.",
-            "Watch for reciprocal signal from opponent next round.",
-        ]
-    elif rounds_played == 1:
-        last = _last_opp_move(opponent)
-        if last == Move.COOPERATE:
-            move = Move.COOPERATE
-            rationale = "Opponent reciprocated signal. Proceed with cooperation."
-            notes = ["Signal exchange successful. Cooperate and monitor."]
-        else:
-            move = Move.DEFECT
-            rationale = "Opponent did not reciprocate signal. Minimize exposure."
-            notes = [
-                "No signal reciprocation detected.",
-                "Cooperate minimally and prepare to exit.",
-                "Consider whether signal infrastructure exists at all.",
-            ]
+        rationale = "One-shot or short-horizon game: open with a costly but bounded signal instead of blind trust."
+    elif last == Move.COOPERATE:
+        move = Move.COOPERATE
+        rationale = "Reciprocal signal detected, so continue with constrained cooperation."
     else:
-        defect_rate = opponent.defection_rate()
-        if defect_rate > 0.5:
-            move = Move.DEFECT
-            rationale = "Sustained defection in short game. Exit mode."
-            notes = ["High defection rate in limited-round game — exit when possible."]
-        else:
-            move = Move.COOPERATE
-            rationale = "Cooperation established in short game. Maintain."
-            notes = ["Short game with established cooperation — maintain through conclusion."]
-
-    return ModuleResult(
-        module=ModuleName.STAKE_AND_SIGNAL,
-        recommended_move=move,
-        rationale=rationale,
-        confidence=0.70,
-        tactical_notes=notes if 'notes' in dir() else [],
-        flags=["ONE_SHOT_MODE"],
+        move = Move.DEFECT
+        rationale = "Signal was not reciprocated, so minimize exposure and avoid a cheap exploit."
+    return ModulePlan(
+        ModuleName.STAKE_AND_SIGNAL,
+        move,
+        rationale,
+        0.72,
+        ["Use escrow, deposits, public commitments, or verifiable concessions.", "Keep the first cooperative gesture limited in scope."],
+        ["SHORT_HORIZON"],
+        action_style="bounded_signal",
     )
 
 
-# ── Module 4: Pavlov ──────────────────────────────────────────────────────────
-def pavlov(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
-    rounds_played = len(opponent.history)
-
-    if rounds_played < 5:
-        # Not enough history — fall back to base TFT
-        result = base_tft(opponent, signals)
-        result.module = ModuleName.PAVLOV
-        result.tactical_notes.insert(0, "Insufficient history for Pavlov (<5 rounds). Using base TFT temporarily.")
-        return result
-
+def pavlov(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
+    if len(opponent.history) < 5:
+        plan = base_tft(opponent, signals)
+        plan.module = ModuleName.PAVLOV
+        plan.tactical_notes.insert(0, "Using base behavior until a 5-round track record exists.")
+        return plan
     last_my = _last_my_move(opponent)
     last_opp = _last_opp_move(opponent)
-
-    # Did I win last round?
-    if last_my and last_opp:
-        my_payoff, _ = (3, 3) if (last_my == Move.COOPERATE and last_opp == Move.COOPERATE) else \
-                       (0, 5) if (last_my == Move.COOPERATE and last_opp == Move.DEFECT) else \
-                       (5, 0) if (last_my == Move.DEFECT and last_opp == Move.COOPERATE) else \
-                       (1, 1)
-        # Win = payoff > 1 (mutual defect baseline)
-        won = my_payoff > 1
-
-        if won:
-            move = last_my  # stay
-            rationale = f"Win-stay: last round was {'mutual coop' if last_my == Move.COOPERATE else 'exploitation'} (payoff {my_payoff}). Repeating."
-        else:
-            move = Move.COOPERATE if last_my == Move.DEFECT else Move.DEFECT
-            rationale = f"Lose-shift: last round payoff was {my_payoff}. Switching move."
+    if last_my is None or last_opp is None:
+        return ModulePlan(ModuleName.PAVLOV, Move.COOPERATE, "Bootstrap cooperation.", 0.65)
+    won = (last_my == Move.COOPERATE and last_opp == Move.COOPERATE) or (last_my == Move.DEFECT and last_opp == Move.COOPERATE)
+    if won:
+        move = last_my
+        rationale = "Win-stay: the last pattern worked well enough, so repeat it."
     else:
-        move = Move.COOPERATE
-        rationale = "Round 1 — cooperate first."
-
-    # Detect Pavlov lock (both defecting for 3+ rounds)
-    recent = opponent.history[-3:]
-    if len(recent) == 3 and all(
-        r.my_move == Move.DEFECT and r.opponent_move == Move.DEFECT for r in recent
-    ):
-        move = Move.COOPERATE
-        rationale = "Pavlov lock detected (3 mutual defects). Forcing cooperation reset."
-
-    return ModuleResult(
-        module=ModuleName.PAVLOV,
-        recommended_move=move,
-        rationale=rationale,
-        confidence=0.80,
-        tactical_notes=[
-            "Win-stay, lose-shift logic active.",
-            "Optimized for impatient opponents needing quick cooperation proof.",
-            "Auto-breaks mutual defect lock after 3 rounds.",
-        ],
-        flags=["IMPATIENT_MODE"],
-    )
+        move = Move.COOPERATE if last_my == Move.DEFECT else Move.DEFECT
+        rationale = "Lose-shift: the last pattern underperformed, so switch once to search for a better lock-in."
+    return ModulePlan(ModuleName.PAVLOV, move, rationale, 0.74, ["Only use when impatience is independently credible."], ["IMPATIENCE_ACCELERATOR"])
 
 
-# ── Module 5: Grim-with-Parole ────────────────────────────────────────────────
-def grim_with_parole(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
+def grim_with_parole(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
     defect_rate = opponent.defection_rate()
     parole_k = compute_parole_interval(defect_rate)
     opponent.parole_interval = parole_k
-
-    # Determine if we're in a parole probe round
     opponent.rounds_since_parole += 1
-    is_parole_round = opponent.rounds_since_parole >= parole_k
-
-    if is_parole_round:
+    if opponent.rounds_since_parole >= parole_k:
         opponent.rounds_since_parole = 0
-        # Graduated probe: small cooperative gesture
-        last_3 = opponent.history[-3:] if len(opponent.history) >= 3 else opponent.history
-        probe_reciprocated = any(r.opponent_move == Move.COOPERATE for r in last_3)
-
-        if probe_reciprocated:
-            move = Move.COOPERATE
-            rationale = f"Parole probe: opponent cooperated in last 3 rounds. Resetting to Base TFT."
-            flags = ["PAROLE_SUCCESS", "RESET_TO_BASE_TFT"]
-        else:
-            # Small cooperative gesture, not full trust
-            move = Move.COOPERATE
-            rationale = f"Parole probe round (interval={parole_k}). Offering one cooperative gesture. Watching for response."
-            flags = ["PAROLE_PROBE"]
+        move = Move.COOPERATE
+        rationale = "Scheduled parole probe: offer one limited reset opportunity without restoring full trust."
+        flags = ["PAROLE_PROBE"]
     else:
         move = Move.DEFECT
-        remaining = parole_k - opponent.rounds_since_parole
-        rationale = f"Grim phase active. Pure defector classification maintained. Next parole probe in {remaining} rounds."
+        rationale = "Exploit pattern remains too strong, so stay in grim phase until the next probe."
         flags = ["GRIM_PHASE"]
-
-    return ModuleResult(
-        module=ModuleName.GRIM_WITH_PAROLE,
-        recommended_move=move,
-        rationale=rationale,
-        confidence=0.85,
-        tactical_notes=[
-            f"Defection rate: {defect_rate:.1%}",
-            f"Parole interval K: {parole_k} rounds",
-            f"Rounds since last parole: {opponent.rounds_since_parole}",
-            "3 failed paroles triggers GTFO threshold evaluation.",
-        ],
-        flags=flags if 'flags' in dir() else [],
+    return ModulePlan(
+        ModuleName.GRIM_WITH_PAROLE,
+        move,
+        rationale,
+        0.84,
+        [f"Defection rate: {defect_rate:.0%}", f"Parole interval: every {parole_k} rounds", "Use small probes, not full resets."],
+        flags,
+        action_style="containment",
     )
 
 
-# ── Module 6: Network TFT ─────────────────────────────────────────────────────
-def network_tft(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
-    rep = opponent.reputation_score
-    R_COOP = 0.60
-    R_DEFECT = 0.35
-
-    if rep >= R_COOP:
-        move = Move.COOPERATE
-        rationale = f"Network reputation score {rep:.2f} ≥ threshold {R_COOP}. Cooperating based on network standing."
-        flags = ["HIGH_REP_COOP"]
-    elif rep <= R_DEFECT:
-        move = Move.DEFECT
-        rationale = f"Network reputation score {rep:.2f} ≤ threshold {R_DEFECT}. Defecting based on network standing."
-        flags = ["LOW_REP_DEFECT"]
-    else:
-        # Middle band — use bilateral history
-        last = _last_opp_move(opponent)
-        move = Move.COOPERATE if (last is None or last == Move.COOPERATE) else Move.DEFECT
-        rationale = f"Reputation {rep:.2f} in ambiguous range. Falling back to bilateral mirroring."
-        flags = ["AMBIGUOUS_REP"]
-
-    return ModuleResult(
-        module=ModuleName.NETWORK_TFT,
-        recommended_move=move,
-        rationale=rationale,
-        confidence=0.78,
-        tactical_notes=[
-            f"Reputation score: {rep:.2f} (0=worst, 1=best)",
-            f"Coop threshold: {R_COOP}, Defect threshold: {R_DEFECT}",
-            "Weight reputation by source independence — clustered social networks count as one voice.",
-            "Make your moves observable when possible — your reputation is the primary asset here.",
-        ],
-        flags=flags if 'flags' in dir() else [],
-    )
-
-
-# ── Module 7: Shadow-Extender ─────────────────────────────────────────────────
-def shadow_extender(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
+def network_tft(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
+    verified_rep = opponent.reputation_score * opponent.source_independence
     last = _last_opp_move(opponent)
-
-    if last is None or last == Move.COOPERATE:
+    if verified_rep >= 0.55:
         move = Move.COOPERATE
-        rationale = "Extending shadow of future: cooperating and building reputation stakes that outlast this game."
-    else:
+        rationale = "Network evidence is strong enough to justify cooperation despite local ambiguity."
+    elif verified_rep <= 0.25:
         move = Move.DEFECT
-        rationale = "Opponent defected. Punishing, but maintaining reputation record for post-game reference."
-
-    return ModuleResult(
-        module=ModuleName.SHADOW_EXTENDER,
-        recommended_move=move,
-        rationale=rationale,
-        confidence=0.72,
-        tactical_notes=[
-            "Introduce ongoing stakes: reputation, future business, public record.",
-            "Create binding mid-game commitments costly to violate on 'last' round.",
-            "Reframe: make opponent aware you'll interact with their reputation after this game.",
-            "If shadow-extension impossible, fall through to Stake-and-Signal.",
-        ],
-        flags=["BOUNDED_GAME"],
-    )
-
-
-# ── Module 8: Irrationality Mode ──────────────────────────────────────────────
-def irrationality_mode(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
-    return ModuleResult(
-        module=ModuleName.IRRATIONALITY_MODE,
-        recommended_move=Move.DEFECT,
-        rationale="Opponent classified as irrational (defections uncorrelated with payoff, self-damaging, no audience). Standard incentive logic doesn't apply. Minimizing exposure.",
-        confidence=0.65,
-        tactical_notes=[
-            "Stop optimizing for bilateral cooperation — it won't work.",
-            "Minimize exposure: avoid large cooperative gestures.",
-            "Signal to third-party observers — behavior is now primarily reputational.",
-            "Engage only at minimal necessary levels.",
-            "Investigate whether opponent is rational within a DIFFERENT payoff structure before finalizing this classification.",
-            "Document and exit when GTFO threshold is reached.",
-        ],
-        flags=["IRRATIONAL_DETECTED", "MINIMIZE_EXPOSURE"],
-    )
-
-
-# ── Module 9: Commons Mode ────────────────────────────────────────────────────
-def commons_mode(opponent: Opponent, signals: EnvironmentSignals) -> ModuleResult:
-    return ModuleResult(
-        module=ModuleName.COMMONS_MODE,
-        recommended_move=Move.COOPERATE,
-        rationale="Commons/collective game detected. Individual TFT mirroring would produce collective defection. Cooperating unconditionally into the commons and signaling norm-adherence.",
-        confidence=0.80,
-        tactical_notes=[
-            "Cooperate unconditionally into the commons.",
-            "Make cooperation visible — signal norm-adherence to ALL players.",
-            "Actively advocate for coordination infrastructure (rules, monitoring, sanctions).",
-            "Direct punishment at defectors' REPUTATION, not bilateral interaction.",
-            "Escalate to institutional actors if defection is systemic.",
-            "Goal: change the game's payoff structure, not win bilateral exchanges.",
-        ],
-        flags=["COLLECTIVE_GAME"],
-    )
-
-
-# ── Module 10: Power-Asymmetry Mode ──────────────────────────────────────────
-def power_asymmetry_mode(opponent: Opponent, signals: EnvironmentSignals, power_ratio: float = 3.0) -> ModuleResult:
-    from .utils import power_ratio_mode
-    mode = power_ratio_mode(power_ratio)
-
-    if mode == "strategic_compliance":
-        move = Move.COOPERATE
-        rationale = f"Power ratio {power_ratio:.1f}:1 (opponent >> you). Strategic compliance mode: cooperating beyond strict reciprocity to preserve relationship while building leverage."
-    elif mode == "modified_tft":
-        last = _last_opp_move(opponent)
-        if last == Move.DEFECT:
-            # Don't always retaliate when they're more powerful
-            move = Move.COOPERATE if random.random() < 0.4 else Move.DEFECT
-            rationale = f"Power ratio {power_ratio:.1f}:1. Modified TFT: absorbing some defections rather than full retaliation."
-        else:
-            move = Move.COOPERATE
-            rationale = f"Power ratio {power_ratio:.1f}:1. Modified TFT: cooperating."
+        rationale = "Network evidence is poor enough that bilateral generosity is too risky."
     else:
-        result = base_tft(opponent, signals)
-        result.module = ModuleName.POWER_ASYMMETRY
-        return result
-
-    return ModuleResult(
-        module=ModuleName.POWER_ASYMMETRY,
-        recommended_move=move,
-        rationale=rationale,
-        confidence=0.70,
-        tactical_notes=[
-            f"Power ratio: {power_ratio:.1f}:1 → {mode.replace('_', ' ').title()} mode",
-            "Build reputation with third parties who may rebalance the dynamic.",
-            "Accumulate leverage quietly: information, allies, alternatives.",
-            "Maintain PRIVATE red lines — known to yourself even if not announced.",
-            "Exit when sufficient leverage is built, not before.",
-        ],
-        flags=[f"POWER_RATIO_{mode.upper()}"],
+        move = Move.COOPERATE if last in (None, Move.COOPERATE) else Move.DEFECT
+        rationale = "Network evidence is mixed, so fall back to the bilateral trace."
+    return ModulePlan(
+        ModuleName.NETWORK_TFT,
+        move,
+        rationale,
+        0.77,
+        [f"Raw reputation: {opponent.reputation_score:.2f}", f"Source independence: {opponent.source_independence:.2f}", f"Verified reputation: {verified_rep:.2f}"],
+        ["NETWORKED_ENVIRONMENT"],
     )
+
+
+def shadow_extender(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
+    last = _last_opp_move(opponent)
+    move = Move.COOPERATE if last in (None, Move.COOPERATE) else Move.DEFECT
+    rationale = "Known end-date detected, so convert this round into a reputation-carrying round rather than a terminal round."
+    return ModulePlan(
+        ModuleName.SHADOW_EXTENDER,
+        move,
+        rationale,
+        0.71,
+        ["Add durable stakes: records, future references, public commitments.", "If no shadow can be extended, drop toward Stake-and-Signal."],
+        ["BOUNDED_GAME"],
+        action_style="shadow_extension",
+    )
+
+
+def irrationality_mode(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
+    return ModulePlan(
+        ModuleName.IRRATIONALITY_MODE,
+        Move.DEFECT,
+        "The opponent looks weakly responsive to incentives, so the goal shifts from cooperation to exposure control.",
+        0.67,
+        ["Keep engagement minimal.", "Document behavior.", "Shift attention to third-party shielding or exit."],
+        ["IRRATIONALITY_OVERRIDE"],
+        action_style="minimal_exposure",
+    )
+
+
+def commons_mode(opponent: Opponent, signals: EnvironmentSignals) -> ModulePlan:
+    return ModulePlan(
+        ModuleName.COMMONS_MODE,
+        Move.COOPERATE,
+        "Commons logic is active, so bilateral retaliation would damage the shared pool more than it helps.",
+        0.79,
+        ["Make cooperative contributions visible.", "Push for rules, monitoring, and institutional enforcement."],
+        ["COMMONS_OVERRIDE"],
+        action_style="institutional_signal",
+    )
+
+
+def apply_power_modifier(move: Move, power_ratio: float) -> ModifierOutcome:
+    mode = power_ratio_mode(power_ratio)
+    if mode == "strategic_compliance":
+        return ModifierOutcome(Move.COOPERATE, [f"Power modifier: ratio {power_ratio:.1f}:1 forced strategic compliance."], ["POWER_COMPLIANCE"])
+    if mode == "modified_tft" and move == Move.DEFECT:
+        if random.random() < 0.55:
+            return ModifierOutcome(Move.COOPERATE, [f"Power modifier softened retaliation under ratio {power_ratio:.1f}:1."], ["POWER_SOFTENED_RETALIATION"])
+    return ModifierOutcome(move, ["Power modifier left the move unchanged."], [])
