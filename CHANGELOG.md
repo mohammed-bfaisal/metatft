@@ -1,26 +1,20 @@
 # Changelog
 
+## 3.0.0
+
+- added direct command mode via `metatft.__main__`
+- added `doctor`, `explain`, and `simulate-pack` commands
+- upgraded versioning and console entry point
+- added named scenario packs for common edge-case environments
+- added regime detection for journal analysis
+- improved storage export/import flow
+- cleaned repo packaging and added `.gitignore`
+- added automated unit tests for key engine behavior
+- refined policy-selection ordering so commons/irrationality contexts are prioritized properly
+- improved modifier application so stack behavior is more concrete than earlier symbolic composition
+
 ## 2.0.0
 
-### Strategic core
-- Reworked the engine so recommendations now come from real policy selection instead of a mostly symbolic stack.
-- Added a base-policy chooser that maps environment signals to the most appropriate strategy family.
-- Added stack construction so noise, power, commons, and irrationality concerns are represented explicitly.
-- Implemented a real power modifier that can soften retaliation when structural asymmetry is high.
-- Improved classifier evidence with exploitation risk, misread risk, endgame risk, relationship value, and a clearer confidence model.
-- Corrected GTFO scoring so projected recovery is not effectively multiplied by horizon twice.
-
-### Recommendation quality
-- Added layered explanations: executive summary, strategic explanation, evidence lines, action steps, avoid steps, and change conditions.
-- Added candidate-module comparison so users can inspect the nearest alternatives.
-- Added “why not” explanation lines for stronger trust in the recommendation.
-
-### CLI redesign
-- Reframed the top-level product around user jobs rather than raw internal modes.
-- Added more visual dashboards using rich panels, tables, gauges, and timelines.
-- Improved analyze and recommend flows so users can inspect the reasoning before logging outcomes.
-- Expanded Learn mode so the product can also explain itself.
-
-### Packaging
-- Refreshed README to match the stronger framing.
-- Kept installation simple with requirements.txt and setup.py.
+- fixed the major mismatch between described MetaTFT stack behavior and the actual recommendation flow
+- improved recommendation explainability and CLI presentation
+- refreshed packaging, README, and repo structure

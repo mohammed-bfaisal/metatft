@@ -1,33 +1,38 @@
 # MetaTFT
 
-MetaTFT is a terminal-based decision system for reciprocal strategy.
+MetaTFT is a terminal-first decision system for reciprocal strategy.
 
-It is **not** built on the claim that Tit for Tat is always best. Instead, it treats plain TFT as a strong baseline for clean repeated bilateral play, then adds environment classification, policy selection, modifiers, ethics checks, and exit logic for cases where plain TFT breaks down.
+It does **not** assume Tit for Tat is universally best. Instead, it treats plain TFT as a strong baseline for clean repeated bilateral play, then adds environment classification, policy selection, structural modifiers, ethics checks, and exit logic for the cases where plain TFT breaks down.
 
-## What changed in this build
+## What is new in this pass
 
-This version upgrades the original prototype in the places that mattered most:
+This pass closes several of the remaining gaps from the earlier build:
 
-- real policy selection instead of a mostly cosmetic module stack
-- layered recommendation output: executive answer, strategic explanation, technical evidence
-- clearer CLI organized around user jobs instead of raw internal modes
-- candidate-module comparison so the app explains **why not the alternatives**
-- stronger signal dashboard with risk bars and relationship summaries
-- corrected GTFO math so projected recovery is not double-counted
-- improved environment confidence scoring and evidence trace
-- better repo packaging for GitHub
+- stronger policy selection and modifier application
+- explicit command-line tooling beyond the interactive menu
+- scenario-pack simulation for common edge-case environments
+- journal regime detection
+- repository cleanup for GitHub use
+- automated tests for core decision logic
+- fixed storage/export behavior and cleaner packaging
 
-## Core idea
+## Product framing
 
-MetaTFT asks five questions before recommending a move:
+MetaTFT is best thought of as:
+
+> a decision system for when to cooperate, when to retaliate, when to forgive, and when to leave.
+
+## Core decision flow
+
+MetaTFT asks:
 
 1. Will this interaction repeat?
 2. How noisy or ambiguous is the signal channel?
-3. Is this bilateral, networked, multiplayer, or a commons problem?
+3. Is this bilateral, networked, multi-player, or a commons problem?
 4. What kind of opponent are you facing?
 5. Is there a bounded horizon, impatience, or strong power asymmetry?
 
-Then it chooses a policy such as:
+Then it chooses a base policy such as:
 
 - Base TFT
 - Generous TFT
@@ -39,41 +44,101 @@ Then it chooses a policy such as:
 - Irrationality Mode
 - Commons Mode
 
-And finally applies modifiers such as power-aware softening and an ethics veto.
+Then it applies structural modifiers such as:
 
-## CLI jobs
+- noise softening
+- network trust boost
+- shadow extension reminders
+- power-aware retaliation softening
+- ethics veto
+- GTFO threshold
 
-The CLI is organized around five user jobs:
+## Interactive CLI jobs
+
+The interactive UI is organized around:
 
 - **Analyze an interaction**
 - **Get a next-move recommendation**
 - **Simulate scenarios**
 - **Review relationship journal**
 - **Learn the model**
+- **Settings**
+
+## Additional command mode
+
+You can also use direct commands:
+
+```bash
+metatft doctor
+metatft explain overview
+metatft explain generous_tft
+metatft simulate-pack clean_repeated
+metatft simulate-pack hard_defector
+```
+
+## Scenario packs
+
+The current repo includes named packs for:
+
+- `clean_repeated`
+- `noisy_repeated`
+- `short_horizon_opportunist`
+- `hard_defector`
+- `desperate_actor`
+
+These make it easier to test MetaTFT against specific failure modes rather than only generic bots.
+
+## Recommendation output
+
+Each recommendation is layered:
+
+- executive answer
+- strategic explanation
+- technical evidence
+- do this / avoid this
+- what would change the answer
+- why not the nearest alternatives
+
+## Journal features
+
+The journal now supports:
+
+- opponent timelines
+- cooperation deficit tracking
+- GTFO evaluation
+- notes and reputation scores
+- import/export of opponent profiles
+- lightweight regime detection, such as:
+  - stable reciprocity
+  - noisy disruption
+  - opportunistic extraction
+  - hardened defection
 
 ## Repository structure
 
 ```text
 metatft_repo/
+├── .gitignore
 ├── CHANGELOG.md
-├── LICENSE
 ├── MetaTFT_Spec.md
 ├── README.md
 ├── requirements.txt
 ├── setup.py
-└── metatft/
-    ├── __init__.py
-    ├── __main__.py
-    ├── cli.py
-    ├── engine.py
-    ├── ethics.py
-    ├── models.py
-    ├── modules.py
-    ├── storage.py
-    └── utils.py
+├── metatft/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── cli.py
+│   ├── engine.py
+│   ├── ethics.py
+│   ├── models.py
+│   ├── modules.py
+│   ├── storage.py
+│   └── utils.py
+└── tests/
+    └── test_engine.py
 ```
 
-## Installation
+## Install
 
 ```bash
 pip install -r requirements.txt
@@ -92,46 +157,13 @@ Or:
 python -m metatft
 ```
 
-## What the recommendation screen now shows
+## Run tests
 
-Each recommendation is layered:
-
-- **Executive answer**
-- **Strategic explanation**
-- **Technical evidence**
-- **Do this / Avoid this**
-- **What would change the answer**
-- **Why not the nearest alternatives**
-
-That makes the tool more legible, more inspectable, and more useful in real situations.
-
-## Simulation
-
-The simulator supports classic opponents:
-
-- always cooperate
-- always defect
-- random
-- TFT
-- grudger
-- detective
-
-It reports score, average payoff, cooperation rate, and module usage.
-
-## Journal
-
-The journal stores relationship history across sessions and supports:
-
-- opponent timelines
-- cooperation deficit tracking
-- GTFO evaluation
-- notes and reputation scores
-- import/export of opponent profiles
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Philosophy
 
-MetaTFT is best thought of as:
-
-> a decision system for when to cooperate, when to retaliate, when to forgive, and when to leave.
-
-That is more honest and more powerful than claiming one strategy wins everywhere.
+MetaTFT is not trying to prove one elegant policy wins everywhere.
+It is trying to help the user classify the environment first, then respond in a way that is strategically sound, legible, and humane.

@@ -1,42 +1,37 @@
-import json
-import os
-from pathlib import Path
-from .models import MetaTFTState
+from __future__ import annotations
 
-STATE_DIR = Path.home() / ".metatft"
-STATE_FILE = STATE_DIR / "state.json"
+import json
+from pathlib import Path
+from typing import Optional
+
+from .models import MetaTFTState, Opponent
+
+STATE_DIR = Path.home() / '.metatft'
+STATE_FILE = STATE_DIR / 'state.json'
+EXPORT_DIR = STATE_DIR / 'exports'
 
 
 def load_state() -> MetaTFTState:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if STATE_FILE.exists():
         try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-            return MetaTFTState.from_dict(data)
+            return MetaTFTState.from_dict(json.loads(STATE_FILE.read_text()))
         except Exception:
             return MetaTFTState()
     return MetaTFTState()
 
 
-def save_state(state: MetaTFTState):
+def save_state(state: MetaTFTState) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w") as f:
-        json.dump(state.to_dict(), f, indent=2)
+    STATE_FILE.write_text(json.dumps(state.to_dict(), indent=2))
 
 
-def export_opponent(state: MetaTFTState, name: str, path: str):
-    if name not in state.opponents:
-        raise ValueError(f"No opponent named '{name}'")
-    opp = state.opponents[name]
-    with open(path, "w") as f:
-        json.dump(opp.to_dict(), f, indent=2)
+def export_opponent(opponent: Opponent, path: Optional[str] = None) -> str:
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    out = Path(path) if path else EXPORT_DIR / f"{opponent.name.replace(' ', '_').lower()}.json"
+    out.write_text(json.dumps(opponent.to_dict(), indent=2))
+    return str(out)
 
 
-def import_opponent(state: MetaTFTState, path: str):
-    from .models import Opponent
-    with open(path, "r") as f:
-        data = json.load(f)
-    opp = Opponent.from_dict(data)
-    state.opponents[opp.name] = opp
-    return opp
+def import_opponent(path: str) -> Opponent:
+    return Opponent.from_dict(json.loads(Path(path).read_text()))

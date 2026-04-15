@@ -1,29 +1,5 @@
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-*.whl
-
-# State / data
-~/.metatft/
-
-# Env
-.env
-.venv/
-venv/
-env/
-
-# OS
+.pytest_cache/
 .DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo

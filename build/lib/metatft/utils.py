@@ -7,6 +7,7 @@ from typing import Iterable, List, Tuple
 
 from .models import Move, RoundEntry
 
+
 PAYOFF_MATRIX = {
     (Move.COOPERATE, Move.COOPERATE): (3, 3),
     (Move.COOPERATE, Move.DEFECT): (0, 5),
@@ -37,21 +38,22 @@ def estimate_noise(history: List[RoundEntry], window: int = 20) -> float:
     if len(recent) < 4:
         return 0.05
 
-    suspect_noise = 0
-    suspect_strategy = 0
-    checks = 0
+    ambiguous_flips = 0
+    total_checks = 0
+    opportunistic_spikes = 0
+
     for i in range(1, len(recent)):
         prev = recent[i - 1]
         cur = recent[i]
-        checks += 1
+        total_checks += 1
         if prev.my_move == Move.COOPERATE and cur.opponent_move == Move.DEFECT:
-            suspect_noise += 1
-        if cur.opponent_move == Move.DEFECT and prev.payoff >= 3:
-            suspect_strategy += 1
+            ambiguous_flips += 1
+        if prev.my_move == Move.COOPERATE and cur.opponent_move == Move.DEFECT and prev.payoff >= 3:
+            opportunistic_spikes += 1
 
-    flip_rate = suspect_noise / max(checks, 1)
-    strategic_penalty = suspect_strategy / max(checks, 1)
-    estimate = 0.03 + 0.75 * flip_rate - 0.35 * strategic_penalty
+    raw = ambiguous_flips / max(total_checks, 1)
+    opportunism_penalty = opportunistic_spikes / max(total_checks, 1)
+    estimate = 0.05 + 0.6 * raw - 0.25 * opportunism_penalty
     return round(clamp(estimate, 0.01, 0.40), 3)
 
 
@@ -68,7 +70,11 @@ def noise_authenticity_test(history: List[RoundEntry], window: int = 20) -> bool
     if n2 == 0:
         return False
 
-    runs = 1 + sum(1 for i in range(1, len(bits)) if bits[i] != bits[i - 1])
+    runs = 1
+    for i in range(1, len(bits)):
+        if bits[i] != bits[i - 1]:
+            runs += 1
+
     expected_runs = (2 * n1 * n2) / (n1 + n2) + 1
     variance = (2 * n1 * n2 * (2 * n1 * n2 - n1 - n2)) / (((n1 + n2) ** 2) * (n1 + n2 - 1))
     if variance <= 0:
@@ -76,13 +82,14 @@ def noise_authenticity_test(history: List[RoundEntry], window: int = 20) -> bool
     z = (runs - expected_runs) / math.sqrt(variance)
     clustered = z < -1.96
 
-    payoff_timed = 0
+    payoff_timed_defections = 0
     for i in range(1, len(recent)):
         prev = recent[i - 1]
         cur = recent[i]
         if prev.my_move == Move.COOPERATE and prev.payoff >= 3 and cur.opponent_move == Move.DEFECT:
-            payoff_timed += 1
-    return not (clustered or payoff_timed >= max(2, len(recent) // 5))
+            payoff_timed_defections += 1
+    strategic_pattern = payoff_timed_defections >= max(2, len(recent) // 5)
+    return not (clustered or strategic_pattern)
 
 
 def compute_parole_interval(defection_rate: float, discount_factor: float = 0.85) -> int:
@@ -104,57 +111,48 @@ def project_ev(history: List[RoundEntry], horizon: int = 10, decay: float = 0.85
         return 1.5
     recent = history[-5:] if len(history) >= 5 else history
     avg_recent = sum(r.payoff for r in recent) / len(recent)
-    trend = 0.0
-    if len(recent) >= 4:
-        mid = len(recent) // 2
-        first = sum(r.payoff for r in recent[:mid]) / max(mid, 1)
-        second = sum(r.payoff for r in recent[mid:]) / max(len(recent) - mid, 1)
+    if len(recent) >= 3:
+        first = sum(r.payoff for r in recent[: len(recent) // 2]) / max(len(recent) // 2, 1)
+        second = sum(r.payoff for r in recent[len(recent) // 2 :]) / max(len(recent) - len(recent) // 2, 1)
         trend = second - first
+    else:
+        trend = 0.0
     per_round_projection = clamp(avg_recent + trend * 0.35, 0.0, 5.0)
-    discounted_total = per_round_projection * (1 - decay ** horizon) / (1 - decay)
-    return round(discounted_total, 2)
+    discounted = per_round_projection * (1 - decay ** horizon) / (1 - decay)
+    return round(discounted, 2)
 
 
 def compute_gtfo_score(cooperation_deficit: float, ev_recovery_total: float) -> float:
     if ev_recovery_total <= 0:
-        return float('inf')
-    return round(max(0.0, cooperation_deficit) / ev_recovery_total, 3)
+        return float("inf")
+    return round(cooperation_deficit / ev_recovery_total, 3)
 
 
 def power_ratio_mode(ratio: float) -> str:
     if ratio < 2.0:
-        return 'normal'
+        return "normal"
     if ratio < 5.0:
-        return 'modified_tft'
-    return 'strategic_compliance'
+        return "modified_tft"
+    return "strategic_compliance"
 
 
 def should_switch(signal_triggered: bool, stochastic_block: float = 0.15) -> bool:
-    return signal_triggered and random.random() > stochastic_block
+    if not signal_triggered:
+        return False
+    return random.random() > stochastic_block
 
 
 def ascii_bar(value: float, width: int = 10) -> str:
     value = clamp(value, 0.0, 1.0)
     filled = int(round(value * width))
-    return '█' * filled + '░' * (width - filled)
-
-
-def sparkline(values: List[float], width: int = 12) -> str:
-    if not values:
-        return '—'
-    chars = '▁▂▃▄▅▆▇█'
-    trimmed = values[-width:]
-    low, high = min(trimmed), max(trimmed)
-    if high == low:
-        return chars[len(chars) // 2] * len(trimmed)
-    return ''.join(chars[int((v - low) / (high - low) * (len(chars) - 1))] for v in trimmed)
+    return "█" * filled + "░" * (width - filled)
 
 
 def cooperation_timeline(history: List[RoundEntry], width: int = 15) -> Tuple[str, str, str]:
     recent = history[-width:]
-    rounds = ' '.join(f'{r.round_num:02d}' for r in recent)
-    my = ' '.join('C' if r.my_move == Move.COOPERATE else 'D' for r in recent)
-    opp = ' '.join('C' if r.opponent_move == Move.COOPERATE else 'D' for r in recent)
+    rounds = " ".join(f"{r.round_num:02d}" for r in recent)
+    my = " ".join("C" if r.my_move == Move.COOPERATE else "D" for r in recent)
+    opp = " ".join("C" if r.opponent_move == Move.COOPERATE else "D" for r in recent)
     return rounds, my, opp
 
 
@@ -165,21 +163,3 @@ def trust_score(history: List[RoundEntry]) -> float:
     base = weighted_recent_values(rates)
     volatility = pstdev(rates) if len(rates) > 1 else 0.0
     return round(clamp(base - 0.2 * volatility, 0.0, 1.0), 3)
-
-
-def detect_regime(history: List[RoundEntry]) -> str:
-    if not history:
-        return 'unclassified'
-    recent = history[-6:]
-    defect_rate = sum(1 for r in recent if r.opponent_move == Move.DEFECT) / len(recent)
-    mutual_coop = sum(1 for r in recent if r.my_move == Move.COOPERATE and r.opponent_move == Move.COOPERATE) / len(recent)
-    alternating = sum(1 for i in range(1, len(recent)) if recent[i].opponent_move != recent[i - 1].opponent_move) / max(len(recent) - 1, 1)
-    if mutual_coop >= 0.67:
-        return 'stable reciprocity'
-    if defect_rate >= 0.67:
-        return 'hardened defection'
-    if alternating >= 0.6:
-        return 'noisy disruption'
-    if defect_rate >= 0.4:
-        return 'opportunistic extraction'
-    return 'mixed / uncertain'
