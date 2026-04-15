@@ -152,7 +152,3 @@ State persists to `~/.metatft/state.json` between sessions.
 This project implements the MetaTFT specification, derived from adversarial self-critique of standard TFT across 4 rounds of debate covering: noise authenticity, module composability, stochastic switching, time-decay memory, irrationality detection, ethics constraints, exit conditions, power asymmetry, and collective-good games.
 
 ---
-
-## License
-
-MIT
